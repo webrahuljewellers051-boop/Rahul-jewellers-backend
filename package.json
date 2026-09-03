@@ -18,6 +18,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.6.0",
     "mongoose": "^9.9.4",
+    "node-cron": "^4.6.0",
     "nodemailer": "^9.0.6",
     "razorpay": "^2.9.8",
     "twilio": "^6.1.0"
