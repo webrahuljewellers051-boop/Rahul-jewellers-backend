@@ -1,5 +1,8 @@
-const cron = require('node-cron');
-const Scheme = require('../models/Scheme');
+import cron from 'node-cron';
+import mongoose from 'mongoose';
+
+// Get the Scheme model safely for ES modules
+const Scheme = mongoose.models.Scheme || mongoose.model('Scheme', new mongoose.Schema({}));
 
 // Mock notification function
 const sendReminderNotification = async (scheme) => {
