@@ -47,4 +47,5 @@ router.post('/admin/:id/cancel', async (req, res) => {
   }
 });
 
-module.exports = router;
+// Fixed for ES Module compatibility on Render
+export default router;
