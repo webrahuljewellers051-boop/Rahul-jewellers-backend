@@ -1,6 +1,7 @@
-const express = require('express');
+import express from 'express';
+import Scheme from '../models/Scheme.js';
+
 const router = express.Router();
-const Scheme = require('../models/Scheme');
 
 // ** Successful Payment Endpoint (Shifts Due Date)**
 router.post('/:id/pay', async (req, res) => {
@@ -47,5 +48,4 @@ router.post('/admin/:id/cancel', async (req, res) => {
   }
 });
 
-// Fixed for ES Module compatibility on Render
 export default router;
