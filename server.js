@@ -3,16 +3,23 @@ import mongoose from 'mongoose';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
+import cookieParser from 'cookie-parser';
+import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import dns from 'dns';
+import schemeRoutes from './routes/schemeRoutes.js';
+import './services/cronService.js';
 
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'RahulJewellers_JWT_Secret_2026_ChangeThisLater_9x7K2m';
 
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header(
     'Access-Control-Allow-Headers',
@@ -22,16 +29,26 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(cors());
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(cookieParser());
+
+const adminAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { success: false, message: 'Too many login attempts. Please try again later.' }
+});
 
 app.get('/', (req, res) => {
   res.send('🚀 Rahul Jewellers (Sheoganj) Backend is Live & Running!');
 });
 
-const HARDCODED_ADMIN_EMAIL = 'viveksoni.main@gmail.com';
-const GMAIL_USER = process.env.SMTP_USER || 'viveksoni.main@gmail.com';
+const HARDCODED_ADMIN_EMAIL = 'web.rahuljewellers051@gmail.com';
+const GMAIL_USER = process.env.SMTP_USER || 'web.rahuljewellers051@gmail.com';
 const GMAIL_APP_PASS = (process.env.SMTP_PASS || 'qjkusqczktwnznar').replace(/\s+/g, '');
 
 const transporter = nodemailer.createTransport({
@@ -40,6 +57,7 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false }
 });
 
+const otpStorage = {};
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://viveksoni2400_db_user:RahulJewellers123@cluster0.hz6lo1n.mongodb.net/rahul_jewellers?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI)
@@ -103,38 +121,75 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.model('Product', productSchema);
 
-let clientEmailOTPStore = {};
+// Mount modular scheme routes
+app.use('/api/schemes', schemeRoutes);
 
-app.post('/api/client/send-email-otp', async (req, res) => {
+// ==========================================
+// AUTH & SESSION ENDPOINTS
+// ==========================================
+app.get('/api/client/admin-session', (req, res) => {
+  const token = req.cookies.admin_token;
+  if (!token) return res.status(401).json({ success: false, message: 'No session' });
+  try {
+    jwt.verify(token, JWT_SECRET);
+    res.json({ success: true, message: 'Session active' });
+  } catch (err) {
+    res.status(401).json({ success: false, message: 'Invalid session' });
+  }
+});
+
+app.post('/api/client/admin-logout', (req, res) => {
+  res.clearCookie('admin_token', { httpOnly: true, sameSite: 'lax' });
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+app.post('/api/client/send-email-otp', adminAuthLimiter, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email || email.trim().toLowerCase() !== HARDCODED_ADMIN_EMAIL.toLowerCase()) {
       return res.status(403).json({ success: false, message: 'Access Denied. Unauthorized Email.' });
     }
+
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    clientEmailOTPStore[email] = otp;
+    otpStorage[email.trim().toLowerCase()] = otp;
+
     await transporter.sendMail({
-      from: `"Rahul Jewellers Admin" <${GMAIL_USER}>`,
-      to: email,
-      subject: 'Rahul Jewellers Admin Passcode',
-      html: `<h3>Your Admin OTP is: <strong>${otp}</strong></h3>`
+      from: '"Rahul Jewellers" <web.rahuljewellers051@gmail.com>',
+      to: HARDCODED_ADMIN_EMAIL,
+      subject: 'Admin Login OTP - Rahul Jewellers',
+      text: `Your secure admin verification code is: ${otp}`
     });
-    res.json({ success: true, message: 'Passcode sent to admin email!' });
+
+    res.json({ success: true, message: 'Admin OTP sent successfully to your inbox!' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-app.post('/api/client/verify-email-otp', (req, res) => {
+app.post('/api/client/verify-email-otp', adminAuthLimiter, (req, res) => {
   const { email, otp } = req.body;
-  const submittedOtp = otp ? otp.toString().trim() : '';
-  if ((clientEmailOTPStore[email] && clientEmailOTPStore[email] === submittedOtp) || submittedOtp === '123456') {
-    delete clientEmailOTPStore[email];
-    return res.json({ success: true, message: 'Admin verified successfully!' });
+  const cleanEmail = email ? email.trim().toLowerCase() : '';
+
+  if (cleanEmail !== HARDCODED_ADMIN_EMAIL.toLowerCase() || otpStorage[cleanEmail] !== otp) {
+    return res.status(401).json({ success: false, message: 'Invalid OTP code or unauthorized email.' });
   }
-  res.status(400).json({ success: false, message: 'Invalid or expired OTP code.' });
+  
+  delete otpStorage[cleanEmail];
+
+  const token = jwt.sign({ email: HARDCODED_ADMIN_EMAIL }, JWT_SECRET, { expiresIn: '7d' });
+  res.cookie('admin_token', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000
+  });
+
+  res.json({ success: true, message: 'Admin verified successfully!' });
 });
 
+// ==========================================
+// API ROUTES: PRODUCTS & CATEGORIES
+// ==========================================
 app.get('/api/products', async (req, res) => {
   try {
     const products = await Product.find().sort({ createdAt: -1 });
@@ -205,6 +260,9 @@ app.delete('/api/admin/categories/:id', async (req, res) => {
   }
 });
 
+// ==========================================
+// API ROUTES: CUSTOMERS & PASSBOOK
+// ==========================================
 app.post('/api/customer/login', async (req, res) => {
   try {
     const { identifier, password } = req.body;
@@ -281,16 +339,40 @@ app.get('/api/admin/customers', async (req, res) => {
 
 app.post('/api/admin/create-customer', async (req, res) => {
   try {
-    const { name, phone, password, customInstallment } = req.body;
-    const count = await User.countDocuments();
-    const customerId = `RJ${1001 + count}`;
+    const { name, phone, password, customInstallment, startDate, finalDueDate } = req.body;
+    const cleanPhone = phone ? phone.trim() : '';
+
+    const existingUser = await User.findOne({ phone: cleanPhone });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: 'Login number already exist.' });
+    }
+
+    const lastUser = await User.findOne().sort({ createdAt: -1 });
+    let nextNum = 1001;
+    if (lastUser && lastUser.customerId && lastUser.customerId.startsWith('RJ')) {
+      const numPart = parseInt(lastUser.customerId.replace('RJ', ''), 10);
+      if (!isNaN(numPart)) nextNum = numPart + 1;
+    }
+    const customerId = `RJ${nextNum}`;
+
     const newCustomer = new User({
-      customerId, name: name.trim(), phone: phone.trim(), password: password.trim(),
-      customInstallment: Number(customInstallment) || 10000, paidMonths: 0, isActive: true
+      customerId, 
+      name: name.trim(), 
+      phone: cleanPhone, 
+      password: password.trim(),
+      customInstallment: Number(customInstallment) || 10000, 
+      paidMonths: 0, 
+      isActive: true,
+      startDate: startDate || new Date().toISOString().split('T')[0],
+      finalDueDate: finalDueDate || ''
     });
+    
     await newCustomer.save();
     res.status(201).json({ success: true, customer: newCustomer });
   } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({ success: false, message: 'Login number already exist.' });
+    }
     res.status(500).json({ success: false, message: err.message });
   }
 });
@@ -304,6 +386,26 @@ app.delete('/api/admin/delete-customer/:id', async (req, res) => {
   }
 });
 
+// Admin endpoint for adding/updating dates
+app.put('/api/admin/customer-dates/:id', async (req, res) => {
+  try {
+    const { startDate, finalDueDate } = req.body;
+    const customer = await User.findById(req.params.id);
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
+
+    if (startDate) customer.startDate = startDate;
+    if (finalDueDate !== undefined) customer.finalDueDate = finalDueDate;
+
+    await customer.save();
+    res.json({ success: true, message: 'Customer dates updated successfully.', customer });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// API ROUTES: STORE SETTINGS & REMINDERS
+// ==========================================
 app.get('/api/store/settings', async (req, res) => {
   try {
     let settings = await StoreSettings.findById('store_config');
