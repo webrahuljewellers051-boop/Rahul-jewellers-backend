@@ -118,7 +118,7 @@ const Product = mongoose.model('Product', productSchema);
 app.use('/api/schemes', schemeRoutes);
 
 // ==========================================
-// AUTH & SESSION ENDPOINTS (Updated for Bearer Token Persistence)
+// AUTH & SESSION ENDPOINTS
 // ==========================================
 app.get('/api/client/admin-session', (req, res) => {
   const authHeader = req.headers.authorization;
@@ -177,7 +177,6 @@ app.post('/api/client/verify-email-otp', adminAuthLimiter, (req, res) => {
 
   const token = jwt.sign({ email: HARDCODED_ADMIN_EMAIL }, JWT_SECRET, { expiresIn: '7d' });
   
-  // Return token in JSON payload so frontend localStorage handles persistence cleanly
   res.json({ success: true, message: 'Admin verified successfully!', token });
 });
 
