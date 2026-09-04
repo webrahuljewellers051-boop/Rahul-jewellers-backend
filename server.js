@@ -139,7 +139,11 @@ app.get('/api/client/admin-session', (req, res) => {
 });
 
 app.post('/api/client/admin-logout', (req, res) => {
-  res.clearCookie('admin_token', { httpOnly: true, sameSite: 'lax' });
+  res.clearCookie('admin_token', { 
+    httpOnly: true, 
+    secure: true, 
+    sameSite: 'none' 
+  });
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
@@ -179,8 +183,8 @@ app.post('/api/client/verify-email-otp', adminAuthLimiter, (req, res) => {
   const token = jwt.sign({ email: HARDCODED_ADMIN_EMAIL }, JWT_SECRET, { expiresIn: '7d' });
   res.cookie('admin_token', token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    secure: true, 
+    sameSite: 'none', 
     maxAge: 7 * 24 * 60 * 60 * 1000
   });
 
@@ -386,7 +390,6 @@ app.delete('/api/admin/delete-customer/:id', async (req, res) => {
   }
 });
 
-// Admin endpoint for adding/updating dates
 app.put('/api/admin/customer-dates/:id', async (req, res) => {
   try {
     const { startDate, finalDueDate } = req.body;

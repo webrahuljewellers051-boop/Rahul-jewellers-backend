@@ -7,10 +7,10 @@ const router = express.Router();
 router.post('/:id/pay', async (req, res) => {
   try {
     const scheme = await Scheme.findById(req.params.id);
-    if (!scheme) return res.status(404).json({ error: 'Scheme not found' });
+    if (!scheme) return res.status(404).json({ success: false, error: 'Scheme not found' });
 
     if (['Completed', 'Cancelled'].includes(scheme.status)) {
-      return res.status(400).json({ error: `Cannot pay for a ${scheme.status.toLowerCase()} scheme.` });
+      return res.status(400).json({ success: false, error: `Cannot pay for a ${scheme.status.toLowerCase()} scheme.` });
     }
 
     // Shift due date forward by 1 month
@@ -23,9 +23,9 @@ router.post('/:id/pay', async (req, res) => {
     scheme.gracePeriodStartDate = null;
 
     await scheme.save();
-    res.json({ message: 'Payment successful. Due date shifted by 1 month.', scheme });
+    res.json({ success: true, message: 'Payment successful. Due date shifted by 1 month.', scheme });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -33,18 +33,18 @@ router.post('/:id/pay', async (req, res) => {
 router.post('/admin/:id/cancel', async (req, res) => {
   try {
     const scheme = await Scheme.findById(req.params.id);
-    if (!scheme) return res.status(404).json({ error: 'Scheme not found' });
+    if (!scheme) return res.status(404).json({ success: false, error: 'Scheme not found' });
 
     if (scheme.status !== 'PendingAdminReview') {
-      return res.status(400).json({ error: 'Scheme must be in Pending Admin Review state to be cancelled.' });
+      return res.status(400).json({ success: false, error: 'Scheme must be in Pending Admin Review state to be cancelled.' });
     }
 
     scheme.status = 'Cancelled';
     await scheme.save();
 
-    res.json({ message: 'Scheme successfully cancelled by admin.', scheme });
+    res.json({ success: true, message: 'Scheme successfully cancelled by admin.', scheme });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

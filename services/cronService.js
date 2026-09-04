@@ -1,8 +1,5 @@
 import cron from 'node-cron';
-import mongoose from 'mongoose';
-
-// Get the Scheme model safely for ES modules
-const Scheme = mongoose.models.Scheme || mongoose.model('Scheme', new mongoose.Schema({}));
+import Scheme from '../models/Scheme.js';
 
 // Mock notification function
 const sendReminderNotification = async (scheme) => {
@@ -18,6 +15,8 @@ cron.schedule('0 0 * * *', async () => {
     const activeSchemes = await Scheme.find({ status: { $in: ['Active', 'GracePeriod'] } });
 
     for (const scheme of activeSchemes) {
+      if (!scheme.dueDate) continue;
+
       const diffTime = today - new Date(scheme.dueDate);
       const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
 
