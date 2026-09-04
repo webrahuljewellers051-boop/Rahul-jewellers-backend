@@ -2,7 +2,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
@@ -48,17 +48,7 @@ app.get('/', (req, res) => {
 });
 
 const HARDCODED_ADMIN_EMAIL = 'web.rahuljewellers051@gmail.com';
-const GMAIL_USER = process.env.SMTP_USER || 'web.rahuljewellers051@gmail.com';
-const GMAIL_APP_PASS = (process.env.SMTP_PASS || 'qjkusqczktwnznar').replace(/\s+/g, '');
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
-  tls: { rejectUnauthorized: false },
-  socketTimeout: 30000,
-  connectionTimeout: 30000,
-  family: 4 // Forces IPv4 and resolves ENETUNREACH errors
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const otpStorage = {};
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://viveksoni2400_db_user:RahulJewellers123@cluster0.hz6lo1n.mongodb.net/rahul_jewellers?retryWrites=true&w=majority';
@@ -160,11 +150,11 @@ app.post('/api/client/send-email-otp', adminAuthLimiter, async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     otpStorage[email.trim().toLowerCase()] = otp;
 
-    await transporter.sendMail({
-      from: '"Rahul Jewellers" <web.rahuljewellers051@gmail.com>',
-      to: HARDCODED_ADMIN_EMAIL,
+    await resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: [HARDCODED_ADMIN_EMAIL],
       subject: 'Admin Login OTP - Rahul Jewellers',
-      text: `Your secure admin verification code is: ${otp}`
+      html: `<p>Your secure admin verification code is: <strong>${otp}</strong></p>`
     });
 
     res.json({ success: true, message: 'Admin OTP sent successfully to your inbox!' });
