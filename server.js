@@ -54,7 +54,10 @@ const GMAIL_APP_PASS = (process.env.SMTP_PASS || 'qjkusqczktwnznar').replace(/\s
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
-  tls: { rejectUnauthorized: false }
+  tls: { rejectUnauthorized: false },
+  socketTimeout: 30000,
+  connectionTimeout: 30000,
+  family: 4 // Forces IPv4 and resolves ENETUNREACH errors
 });
 
 const otpStorage = {};
