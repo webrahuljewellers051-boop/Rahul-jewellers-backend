@@ -269,7 +269,9 @@ app.post('/api/customer/login', async (req, res) => {
     });
     if (!customer) return res.status(404).json({ success: false, message: 'Account not found.' });
     if (customer.password !== cleanPassword) return res.status(401).json({ success: false, message: 'Incorrect password.' });
-    if (customer.isActive === false) return res.status(403).json({ success: false, message: 'Account deactivated.' });
+    if (customer.isActive === false) {
+      return res.status(403).json({ success: false, message: 'Your account has been deactivated by the store admin. Please contact Rahul Jewellers.' });
+    }
     res.json({ success: true, customer });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -279,6 +281,10 @@ app.post('/api/customer/login', async (req, res) => {
 app.get('/api/customer/profile/:id', async (req, res) => {
   try {
     const customer = await User.findById(req.params.id);
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
+    if (customer.isActive === false) {
+      return res.status(403).json({ success: false, message: 'Account deactivated.' });
+    }
     res.json({ success: true, customer });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -374,6 +380,21 @@ app.delete('/api/admin/delete-customer/:id', async (req, res) => {
   try {
     await User.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: 'Customer deleted.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.put('/api/admin/customer-status/:id', async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    const customer = await User.findById(req.params.id);
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
+
+    customer.isActive = isActive;
+    await customer.save();
+    
+    res.json({ success: true, message: 'Customer status updated successfully.', customer });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
