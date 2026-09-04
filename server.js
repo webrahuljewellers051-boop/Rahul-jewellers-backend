@@ -118,11 +118,13 @@ const Product = mongoose.model('Product', productSchema);
 app.use('/api/schemes', schemeRoutes);
 
 // ==========================================
-// AUTH & SESSION ENDPOINTS
+// AUTH & SESSION ENDPOINTS (Updated for Bearer Token Persistence)
 // ==========================================
 app.get('/api/client/admin-session', (req, res) => {
-  const token = req.cookies.admin_token;
-  if (!token) return res.status(401).json({ success: false, message: 'No session' });
+  const authHeader = req.headers.authorization;
+  const token = (authHeader && authHeader.startsWith('Bearer ')) ? authHeader.split(' ')[1] : req.cookies.admin_token;
+  
+  if (!token) return res.status(401).json({ success: false, message: 'No session token' });
   try {
     jwt.verify(token, JWT_SECRET);
     res.json({ success: true, message: 'Session active' });
@@ -175,16 +177,8 @@ app.post('/api/client/verify-email-otp', adminAuthLimiter, (req, res) => {
 
   const token = jwt.sign({ email: HARDCODED_ADMIN_EMAIL }, JWT_SECRET, { expiresIn: '7d' });
   
-  // Explicitly set domain attributes for cross-site Vercel <-> Render cookies
-  res.cookie('admin_token', token, {
-    httpOnly: true,
-    secure: true, 
-    sameSite: 'none', 
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-    path: '/'
-  });
-
-  res.json({ success: true, message: 'Admin verified successfully!' });
+  // Return token in JSON payload so frontend localStorage handles persistence cleanly
+  res.json({ success: true, message: 'Admin verified successfully!', token });
 });
 
 // ==========================================
