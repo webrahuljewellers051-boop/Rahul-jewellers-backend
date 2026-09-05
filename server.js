@@ -293,7 +293,7 @@ app.get('/api/customer/profile/:id', async (req, res) => {
 
 app.post('/api/admin/manual-passbook-update', async (req, res) => {
   try {
-    const { userId, monthNum, action, amount } = req.body;
+    const { userId, monthNum, action } = req.body;
     const customer = await User.findById(userId);
     if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
     if (!customer.paymentHistory) customer.paymentHistory = [];
@@ -309,15 +309,15 @@ app.post('/api/admin/manual-passbook-update', async (req, res) => {
       if (targetMonth > customer.paidMonths) customer.paidMonths = targetMonth;
       const idx = customer.paymentHistory.findIndex(p => p.monthNum === targetMonth);
       if (idx > -1) {
-        customer.paymentHistory[idx].transactionId = 'SHOWROOM_CASH';
+        customer.paymentHistory[idx].transactionId = 'VERIFIED_WHATSAPP_SS';
       } else {
-        customer.paymentHistory.push({ monthNum: targetMonth, amount: Number(amount) || customer.customInstallment || 10000, transactionId: 'SHOWROOM_CASH' });
+        customer.paymentHistory.push({ monthNum: targetMonth, amount: customer.customInstallment || 10000, transactionId: 'VERIFIED_WHATSAPP_SS' });
       }
     } else if (action === 'UNPAY') {
       const higherPaid = customer.paymentHistory.some(p => p.monthNum > targetMonth);
       if (higherPaid) return res.status(400).json({ success: false, message: 'Cannot unpay while subsequent months are paid.' });
       customer.paymentHistory = customer.paymentHistory.filter(p => p.monthNum !== targetMonth);
-      if (customer.paidMonths >= targetMonth) customer.paidMonths = Math.max(0, targetMonth - 1);
+      customer.paidMonths = Math.max(0, targetMonth - 1);
     }
     await customer.save();
     const updatedCustomer = await User.findById(userId);
@@ -395,22 +395,6 @@ app.put('/api/admin/customer-status/:id', async (req, res) => {
     await customer.save();
     
     res.json({ success: true, message: 'Customer status updated successfully.', customer });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.put('/api/admin/customer-dates/:id', async (req, res) => {
-  try {
-    const { startDate, finalDueDate } = req.body;
-    const customer = await User.findById(req.params.id);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
-
-    if (startDate) customer.startDate = startDate;
-    if (finalDueDate !== undefined) customer.finalDueDate = finalDueDate;
-
-    await customer.save();
-    res.json({ success: true, message: 'Customer dates updated successfully.', customer });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
