@@ -291,6 +291,24 @@ app.get('/api/customer/profile/:id', async (req, res) => {
   }
 });
 
+app.put('/api/customer/update-profile/:id', async (req, res) => {
+  try {
+    const { name, phone, password, address } = req.body;
+    const customer = await User.findById(req.params.id);
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
+
+    if (name) customer.name = name.trim();
+    if (phone) customer.phone = phone.trim();
+    if (password) customer.password = password.trim();
+    if (address !== undefined) customer.address = address.trim();
+
+    await customer.save();
+    res.json({ success: true, customer });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.post('/api/admin/manual-passbook-update', async (req, res) => {
   try {
     const { userId, monthNum, action } = req.body;
