@@ -7,6 +7,7 @@ import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import dns from 'dns';
+import { GoogleGenAI } from '@google/genai';
 import schemeRoutes from './routes/schemeRoutes.js';
 import './services/cronService.js';
 
@@ -16,6 +17,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'RahulJewellers_JWT_Secret_2026_ChangeThisLater_9x7K2m';
+const ai = new GoogleGenAI();
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
@@ -419,7 +421,7 @@ app.put('/api/admin/customer-status/:id', async (req, res) => {
 });
 
 // ==========================================
-// API ROUTES: STORE SETTINGS & REMINDERS
+// API ROUTES: STORE SETTINGS, REMINDERS & AI SUPPORT CHAT
 // ==========================================
 app.get('/api/store/settings', async (req, res) => {
   try {
@@ -459,6 +461,34 @@ app.post('/api/admin/send-whatsapp-reminder', async (req, res) => {
     res.json({ success: true, url: `https://wa.me/91${phone}?text=${encodeURIComponent(message)}` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/support/chat', async (req, res) => {
+  try {
+    const { message, customerContext } = req.body;
+    
+    const systemInstruction = `
+      You are an AI customer support assistant for "Rahul Jewellers" located in Main Market, Sheoganj, Rajasthan. 
+      Your job is to assist customers with:
+      - The 12+1 Gold Savings Scheme (12 monthly installments + 1 month free bonus).
+      - Showroom details, timings (10:00 AM to 6:00 PM), and pure 916 hallmarked gold/silver collections.
+      - Helpline numbers: +91 9950091024 / +91 9461452322.
+      - Instruct them to send payment screenshots on WhatsApp for manual passbook verification if they ask about online scheme payments.
+      Be polite, welcoming, and concise.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: message,
+      config: {
+        systemInstruction: systemInstruction,
+      }
+    });
+
+    res.json({ success: true, reply: response.text });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Support chat unavailable right now.' });
   }
 });
 
