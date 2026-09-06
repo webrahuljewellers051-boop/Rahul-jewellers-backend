@@ -466,7 +466,7 @@ app.post('/api/admin/send-whatsapp-reminder', async (req, res) => {
 
 app.post('/api/support/chat', async (req, res) => {
   try {
-    const { message, customerContext } = req.body;
+    const { message } = req.body;
     
     const systemInstruction = `
       You are an AI customer support assistant for "Rahul Jewellers" located in Main Market, Sheoganj, Rajasthan. 
@@ -479,7 +479,7 @@ app.post('/api/support/chat', async (req, res) => {
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-2.0-flash',
       contents: message,
       config: {
         systemInstruction: systemInstruction,
@@ -488,6 +488,7 @@ app.post('/api/support/chat', async (req, res) => {
 
     res.json({ success: true, reply: response.text });
   } catch (err) {
+    console.error("Support Chat Error:", err);
     res.status(500).json({ success: false, message: 'Support chat unavailable right now.' });
   }
 });
