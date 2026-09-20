@@ -15,6 +15,10 @@ dns.setServers(['8.8.8.8', '8.8.4.4']);
 dotenv.config();
 
 const app = express();
+
+// Trust proxy so Render passes correct client IP headers
+app.set('trust proxy', true);
+
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'RahulJewellers_JWT_Secret_2026_ChangeThisLater_9x7K2m';
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -55,8 +59,8 @@ const allowedAdminIps = [
 ];
 
 const ipWhitelistMiddleware = (req, res, next) => {
-  const xForwardedFor = req.headers['x-forwarded-for'];
-  const clientIp = xForwardedFor ? xForwardedFor.split(',')[0].trim() : req.ip;
+  // With 'trust proxy' enabled, req.ip will now correctly read the client's true IP
+  const clientIp = req.ip;
 
   if (allowedAdminIps.includes(clientIp)) {
     return next();
