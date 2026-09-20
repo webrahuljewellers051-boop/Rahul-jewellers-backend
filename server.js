@@ -45,6 +45,33 @@ const adminAuthLimiter = rateLimit({
   message: { success: false, message: 'Too many login attempts. Please try again later.' }
 });
 
+// ==========================================
+// IP WHITELISTING MIDDLEWARE FOR ADMIN ROUTES
+// ==========================================
+const allowedAdminIps = [
+  '127.0.0.1',     // Localhost IPv4
+  '::1',           // Localhost IPv6
+  '152.59.52.136', // Your personal admin IP address
+];
+
+const ipWhitelistMiddleware = (req, res, next) => {
+  const xForwardedFor = req.headers['x-forwarded-for'];
+  const clientIp = xForwardedFor ? xForwardedFor.split(',')[0].trim() : req.ip;
+
+  if (allowedAdminIps.includes(clientIp)) {
+    return next();
+  }
+
+  console.warn(`⚠️ Blocked unauthorized admin route access attempt from IP: ${clientIp}`);
+  return res.status(403).json({ 
+    success: false, 
+    message: 'Access Denied. Your IP address is not authorized to access admin routes.' 
+  });
+};
+
+// Apply IP whitelisting specifically to all '/api/admin' routes
+app.use('/api/admin', ipWhitelistMiddleware);
+
 app.get('/', (req, res) => {
   res.send('🚀 Rahul Jewellers (Sheoganj) Backend is Live & Running!');
 });
