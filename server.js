@@ -16,7 +16,7 @@ dotenv.config();
 
 const app = express();
 
-// Trust proxy so Render passes correct client IP headers
+// Trust proxy configuration for Render deployment
 app.set('trust proxy', true);
 
 const PORT = process.env.PORT || 5000;
@@ -59,7 +59,6 @@ const allowedAdminIps = [
 ];
 
 const ipWhitelistMiddleware = (req, res, next) => {
-  // With 'trust proxy' enabled, req.ip will now correctly read the client's true IP
   const clientIp = req.ip;
 
   if (allowedAdminIps.includes(clientIp)) {
@@ -111,6 +110,7 @@ const userSchema = new mongoose.Schema({
   address: { type: String, default: '' },
   customInstallment: { type: Number, default: 10000 },
   paidMonths: { type: Number, default: 0 },
+  isLaborFree: { type: Boolean, default: false }, // Tracks 100% making charge discount eligibility
   startDate: { type: String, default: () => new Date().toISOString().split('T')[0] },
   finalDueDate: { type: String },
   isActive: { type: Boolean, default: true },
@@ -342,6 +342,7 @@ app.put('/api/customer/update-profile/:id', async (req, res) => {
   }
 });
 
+// Updated Manual Passbook Update: Requires full payment for all 12 months, sets isLaborFree = true upon completion
 app.post('/api/admin/manual-passbook-update', async (req, res) => {
   try {
     const { userId, monthNum, action } = req.body;
@@ -358,21 +359,72 @@ app.post('/api/admin/manual-passbook-update', async (req, res) => {
         }
       }
       if (targetMonth > customer.paidMonths) customer.paidMonths = targetMonth;
+      
       const idx = customer.paymentHistory.findIndex(p => p.monthNum === targetMonth);
+      const installmentAmount = customer.customInstallment || 10000;
+
       if (idx > -1) {
         customer.paymentHistory[idx].transactionId = 'VERIFIED_WHATSAPP_SS';
+        customer.paymentHistory[idx].amount = installmentAmount;
       } else {
-        customer.paymentHistory.push({ monthNum: targetMonth, amount: customer.customInstallment || 10000, transactionId: 'VERIFIED_WHATSAPP_SS' });
+        customer.paymentHistory.push({ 
+          monthNum: targetMonth, 
+          amount: installmentAmount, 
+          transactionId: 'VERIFIED_WHATSAPP_SS' 
+        });
+      }
+
+      // Unlock 100% making charge waiver once all 12 installments are paid
+      if (customer.paidMonths >= 12) {
+        customer.isLaborFree = true;
       }
     } else if (action === 'UNPAY') {
       const higherPaid = customer.paymentHistory.some(p => p.monthNum > targetMonth);
       if (higherPaid) return res.status(400).json({ success: false, message: 'Cannot unpay while subsequent months are paid.' });
+      
       customer.paymentHistory = customer.paymentHistory.filter(p => p.monthNum !== targetMonth);
       customer.paidMonths = Math.max(0, targetMonth - 1);
+      
+      if (customer.paidMonths < 12) {
+        customer.isLaborFree = false;
+      }
     }
+    
     await customer.save();
     const updatedCustomer = await User.findById(userId);
     res.json({ success: true, customer: updatedCustomer });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// New Redemption Route for Checkout / Making Charges Discount
+app.post('/api/customer/redeem-scheme', async (req, res) => {
+  try {
+    const { userId, standardMakingCharges } = req.body;
+    
+    const customer = await User.findById(userId);
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer account not found.' });
+    }
+
+    const totalAccumulatedSavings = customer.paymentHistory.reduce((sum, item) => sum + item.amount, 0);
+    const finalMakingCharges = customer.isLaborFree ? 0 : (standardMakingCharges || 0);
+
+    res.json({
+      success: true,
+      message: customer.isLaborFree 
+        ? 'Congratulations! 100% Making Charges Discount applied successfully.' 
+        : 'Standard rates applied.',
+      redemptionDetails: {
+        customerId: customer.customerId,
+        customerName: customer.name,
+        totalAccumulatedSavings,
+        standardMakingCharges: standardMakingCharges || 0,
+        makingChargesDiscountPercentage: customer.isLaborFree ? 100 : 0,
+        finalMakingChargesToPay: finalMakingCharges
+      }
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -412,6 +464,7 @@ app.post('/api/admin/create-customer', async (req, res) => {
       password: password.trim(),
       customInstallment: Number(customInstallment) || 10000, 
       paidMonths: 0, 
+      isLaborFree: false,
       isActive: true,
       startDate: startDate || new Date().toISOString().split('T')[0],
       finalDueDate: finalDueDate || ''
@@ -502,7 +555,7 @@ app.post('/api/support/chat', async (req, res) => {
     const systemInstruction = `
       You are an AI customer support assistant for "Rahul Jewellers" located in Main Market, Sheoganj, Rajasthan. 
       Your job is to assist customers with:
-      - The 12+1 Gold Savings Scheme (12 monthly installments + 1 month free bonus).
+      - The 12+1 Gold Savings Scheme (12 monthly installments paid fully, granting a 100% discount on making charges upon redemption).
       - Showroom details, timings (10:00 AM to 6:00 PM), and pure 916 hallmarked gold/silver collections.
       - Helpline numbers: +91 9950091024 / +91 9461452322.
       - Instruct them to send payment screenshots on WhatsApp for manual passbook verification if they ask about online scheme payments.
