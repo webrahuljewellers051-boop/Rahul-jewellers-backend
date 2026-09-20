@@ -141,7 +141,7 @@ const productSchema = new mongoose.Schema({
   category: { type: String, required: true },
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
   weight: { type: String, required: true },
-  price: { type: Number, required: true },
+  price: { type: Number, default: 0 }, // Made optional with default 0
   imageUrl: { type: String, required: true }
 }, { timestamps: true });
 
@@ -228,7 +228,12 @@ app.get('/api/products', async (req, res) => {
 app.post('/api/admin/products', async (req, res) => {
   try {
     const { title, category, weight, price, imageUrl, categoryId } = req.body;
-    const cleanPrice = Number(String(price).replace(/[^0-9.-]+/g, ''));
+    
+    // Optional price handling: defaults to 0 if not provided or empty
+    const cleanPrice = price !== undefined && price !== '' 
+      ? Number(String(price).replace(/[^0-9.-]+/g, '')) 
+      : 0;
+
     const newProduct = new Product({
       title: title.trim(),
       category: category.trim(),
@@ -342,7 +347,6 @@ app.put('/api/customer/update-profile/:id', async (req, res) => {
   }
 });
 
-// Updated Manual Passbook Update: Requires full payment for all 12 months, sets isLaborFree = true upon completion
 app.post('/api/admin/manual-passbook-update', async (req, res) => {
   try {
     const { userId, monthNum, action } = req.body;
@@ -374,7 +378,6 @@ app.post('/api/admin/manual-passbook-update', async (req, res) => {
         });
       }
 
-      // Unlock 100% making charge waiver once all 12 installments are paid
       if (customer.paidMonths >= 12) {
         customer.isLaborFree = true;
       }
@@ -398,7 +401,6 @@ app.post('/api/admin/manual-passbook-update', async (req, res) => {
   }
 });
 
-// New Redemption Route for Checkout / Making Charges Discount
 app.post('/api/customer/redeem-scheme', async (req, res) => {
   try {
     const { userId, standardMakingCharges } = req.body;
@@ -541,7 +543,7 @@ app.put('/api/store/settings', async (req, res) => {
 app.post('/api/admin/send-whatsapp-reminder', async (req, res) => {
   try {
     const { phone, name, customerId, nextMonth, amount } = req.body;
-    const message = `Namaste ${name} ji,\n\nReminder from *Rahul Jewellers (Sheoganj)* for your 12+1 Gold Savings Scheme.\n\n• Customer ID: ${customerId}\n• Due: Installment Month #${nextMonth}\n• Installment Amount: ₹${Number(amount || 0).toLocaleString('en-IN')}\n\nThank you for saving with us!`;
+    const message = `Namaste ${name} ji,\n\nReminder from *Rahul Jewellers (Sheoganj)* for your 12-Month Savings Scheme.\n\n• Customer ID: ${customerId}\n• Due: Installment Month #${nextMonth}\n• Installment Amount: ₹${Number(amount || 0).toLocaleString('en-IN')}\n\nThank you for saving with us!`;
     res.json({ success: true, url: `https://wa.me/91${phone}?text=${encodeURIComponent(message)}` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -555,7 +557,7 @@ app.post('/api/support/chat', async (req, res) => {
     const systemInstruction = `
       You are an AI customer support assistant for "Rahul Jewellers" located in Main Market, Sheoganj, Rajasthan. 
       Your job is to assist customers with:
-      - The 12+1 Gold Savings Scheme (12 monthly installments paid fully, granting a 100% discount on making charges upon redemption).
+      - The 12-Month Savings Scheme (12 monthly installments paid fully, granting a 100% discount on making charges upon redemption).
       - Showroom details, timings (10:00 AM to 6:00 PM), and pure 916 hallmarked gold/silver collections.
       - Helpline numbers: +91 9950091024 / +91 9461452322.
       - Instruct them to send payment screenshots on WhatsApp for manual passbook verification if they ask about online scheme payments.
