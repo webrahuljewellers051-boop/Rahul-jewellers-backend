@@ -16,7 +16,6 @@ dotenv.config();
 
 const app = express();
 
-// Trust proxy configuration for Render deployment
 app.set('trust proxy', true);
 
 const PORT = process.env.PORT || 5000;
@@ -48,32 +47,6 @@ const adminAuthLimiter = rateLimit({
   max: 10,
   message: { success: false, message: 'Too many login attempts. Please try again later.' }
 });
-
-// ==========================================
-// IP WHITELISTING MIDDLEWARE FOR ADMIN ROUTES
-// ==========================================
-const allowedAdminIps = [
-  '127.0.0.1',     // Localhost IPv4
-  '::1',           // Localhost IPv6
-  '152.59.52.136', // Your personal admin IP address
-];
-
-const ipWhitelistMiddleware = (req, res, next) => {
-  const clientIp = req.ip;
-
-  if (allowedAdminIps.includes(clientIp)) {
-    return next();
-  }
-
-  console.warn(`⚠️ Blocked unauthorized admin route access attempt from IP: ${clientIp}`);
-  return res.status(403).json({ 
-    success: false, 
-    message: 'Access Denied. Your IP address is not authorized to access admin routes.' 
-  });
-};
-
-// Apply IP whitelisting specifically to all '/api/admin' routes
-app.use('/api/admin', ipWhitelistMiddleware);
 
 app.get('/', (req, res) => {
   res.send('🚀 Rahul Jewellers (Sheoganj) Backend is Live & Running!');
@@ -110,7 +83,7 @@ const userSchema = new mongoose.Schema({
   address: { type: String, default: '' },
   customInstallment: { type: Number, default: 10000 },
   paidMonths: { type: Number, default: 0 },
-  isLaborFree: { type: Boolean, default: false }, // Tracks 100% making charge discount eligibility
+  isLaborFree: { type: Boolean, default: false },
   startDate: { type: String, default: () => new Date().toISOString().split('T')[0] },
   finalDueDate: { type: String },
   isActive: { type: Boolean, default: true },
@@ -141,13 +114,12 @@ const productSchema = new mongoose.Schema({
   category: { type: String, required: true },
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
   weight: { type: String, required: true },
-  price: { type: Number, default: 0 }, // Made optional with default 0
+  price: { type: Number, default: 0 },
   imageUrl: { type: String, required: true }
 }, { timestamps: true });
 
 const Product = mongoose.model('Product', productSchema);
 
-// Mount modular scheme routes
 app.use('/api/schemes', schemeRoutes);
 
 // ==========================================
@@ -229,7 +201,6 @@ app.post('/api/admin/products', async (req, res) => {
   try {
     const { title, category, weight, price, imageUrl, categoryId } = req.body;
     
-    // Optional price handling: defaults to 0 if not provided or empty
     const cleanPrice = price !== undefined && price !== '' 
       ? Number(String(price).replace(/[^0-9.-]+/g, '')) 
       : 0;
