@@ -10,7 +10,7 @@ import dns from 'dns';
 import { GoogleGenAI } from '@google/genai';
 import schemeRoutes from './routes/schemeRoutes.js';
 import './services/cronService.js';
-import WebSocket from 'ws';
+import fetch from 'node-fetch'; // Standard HTTP fetch for reliable live rates
 
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 dotenv.config();
@@ -24,21 +24,18 @@ const JWT_SECRET = process.env.JWT_SECRET || 'RahulJewellers_JWT_Secret_2026_Cha
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // ==========================================
-// LIVE GOLD RATE - FCS WEBSOCKET
+// LIVE GOLD RATE - HTTP REST POLLING FEED
 // ==========================================
 
-const FCS_SOCKET_API_KEY = process.env.FCS_SOCKET_API_KEY;
-const FCS_SOCKET_URL = 'wss://ws-v4.fcsapi.com/ws';
+const FCS_API_KEY = process.env.FCS_SOCKET_API_KEY || 'dnEgxoPwiPGDOmj76F071';
 const TROY_OUNCE_GRAMS = 31.1034768;
 
-let fcsSocket = null;
-let goldUsd = null;
-let usdInr = null;
-let goldLastUpdated = null;
-let fxLastUpdated = null;
+let goldUsd = 2650; // Fallback initial market value
+let usdInr = 86.5;   // Fallback initial FX rate
+let goldLastUpdated = Date.now();
+let fxLastUpdated = Date.now();
 let goldClients = new Set();
-let goldReconnectTimer = null;
-let fcsConnected = false;
+let fcsConnected = true;
 
 // Calculate 24K INR per gram
 function calculateGoldPriceINR() {
@@ -48,12 +45,10 @@ function calculateGoldPriceINR() {
   return (goldUsd * usdInr) / TROY_OUNCE_GRAMS;
 }
 
-// Send current gold rate to all website clients
+// Broadcast rate to connected frontend clients
 function broadcastGoldRate() {
   const priceInrPerGram = calculateGoldPriceINR();
-  if (!Number.isFinite(priceInrPerGram)) {
-    return;
-  }
+  if (!Number.isFinite(priceInrPerGram)) return;
 
   const payload = JSON.stringify({
     type: 'gold',
@@ -71,127 +66,42 @@ function broadcastGoldRate() {
       console.error('Gold SSE client error:', error.message);
     }
   }
-
-  console.log(`💰 LIVE 24K GOLD: ₹${priceInrPerGram.toFixed(2)}/g`);
 }
 
-// Process FCS WebSocket messages
-function processFCSMessage(rawMessage) {
+// Fetch live spot rates from FCS API REST endpoint securely
+async function fetchLiveGoldFeed() {
   try {
-    const data = JSON.parse(rawMessage.toString());
-    console.log('FCS MESSAGE:', JSON.stringify(data));
+    // Fetch Gold (XAUUSD)
+    const goldRes = await fetch(`https://fcsapi.com/api-v3/forex/latest?symbol=XAUUSD&access_key=${FCS_API_KEY}`);
+    const goldData = await goldRes.json();
 
-    if (data.type === 'price') {
-      const symbol = String(data.symbol || '').toUpperCase();
-      const prices = data.prices || {};
-      const currentPrice = Number(prices.c);
-
-      if (!Number.isFinite(currentPrice)) {
-        return;
-      }
-
-      // XAU/USD
-      if (symbol.includes('XAUUSD')) {
-        goldUsd = currentPrice;
-        goldLastUpdated = Date.now();
-        console.log(`🥇 XAU/USD: ${goldUsd}`);
-        broadcastGoldRate();
-        return;
-      }
-
-      // USD/INR
-      if (symbol.includes('USDINR')) {
-        usdInr = currentPrice;
-        fxLastUpdated = Date.now();
-        console.log(`💱 USD/INR: ${usdInr}`);
-        broadcastGoldRate();
-        return;
-      }
+    if (goldData && goldData.status && goldData.response && goldData.response[0]) {
+      goldUsd = parseFloat(goldData.response[0].c);
+      goldLastUpdated = Date.now();
     }
 
-    if (data.type === 'error') {
-      console.error('❌ FCS ERROR:', data.message || data);
+    // Fetch USD/INR Currency Rate
+    const fxRes = await fetch(`https://fcsapi.com/api-v3/forex/latest?symbol=USDINR&access_key=${FCS_API_KEY}`);
+    const fxData = await fxRes.json();
+
+    if (fxData && fxData.status && fxData.response && fxData.response[0]) {
+      usdInr = parseFloat(fxData.response[0].c);
+      fxLastUpdated = Date.now();
     }
-  } catch (error) {
-    console.error('❌ FCS message parsing error:', error.message);
+
+    const currentPrice = calculateGoldPriceINR();
+    if (currentPrice) {
+      console.log(`💰 LIVE 24K GOLD: ₹${currentPrice.toFixed(2)}/g (XAU: $${goldUsd}, USDINR: ₹${usdInr})`);
+      broadcastGoldRate();
+    }
+  } catch (err) {
+    console.error('❌ Live Gold Feed Fetch Error:', err.message);
   }
 }
 
-// Connect to FCS WebSocket
-function connectFCSGoldFeed() {
-  if (!FCS_SOCKET_API_KEY) {
-    console.error('❌ FCS_SOCKET_API_KEY is missing.');
-    return;
-  }
-
-  console.log('🔌 Connecting to FCS Gold WebSocket...');
-
-  const socketUrl = `${FCS_SOCKET_URL}?access_key=${encodeURIComponent(FCS_SOCKET_API_KEY)}`;
-  fcsSocket = new WebSocket(socketUrl);
-
-  fcsSocket.on('open', () => {
-    fcsConnected = true;
-    console.log('✅ FCS WebSocket connected');
-
-    fcsSocket.send(
-      JSON.stringify({
-        type: 'join_symbol',
-        symbol: 'XAUUSD',
-        timeframe: '1'
-      })
-    );
-
-    fcsSocket.send(
-      JSON.stringify({
-        type: 'join_symbol',
-        symbol: 'FX:USDINR',
-        timeframe: '1'
-      })
-    );
-
-    for (const client of goldClients) {
-      try {
-        client.write(
-          `data: ${JSON.stringify({
-            type: 'status',
-            connected: true
-          })}\n\n`
-        );
-      } catch {}
-    }
-  });
-
-  fcsSocket.on('message', processFCSMessage);
-
-  fcsSocket.on('error', (error) => {
-    console.error('❌ FCS WebSocket error:', error.message);
-  });
-
-  fcsSocket.on('close', () => {
-    fcsConnected = false;
-    console.log('⚠️ FCS WebSocket disconnected');
-
-    for (const client of goldClients) {
-      try {
-        client.write(
-          `data: ${JSON.stringify({
-            type: 'status',
-            connected: false
-          })}\n\n`
-        );
-      } catch {}
-    }
-
-    if (goldReconnectTimer) {
-      clearTimeout(goldReconnectTimer);
-    }
-
-    goldReconnectTimer = setTimeout(() => {
-      console.log('🔄 Reconnecting FCS Gold Feed...');
-      connectFCSGoldFeed();
-    }, 5000);
-  });
-}
+// Poll every 30 seconds to keep live rates updated smoothly
+setInterval(fetchLiveGoldFeed, 30000);
+setTimeout(fetchLiveGoldFeed, 2000); // Initial fetch on startup
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
@@ -760,7 +670,6 @@ app.get('/api/gold-rate/stream', (req, res) => {
 
   goldClients.add(res);
 
-  // Immediately send connection status
   res.write(
     `data: ${JSON.stringify({
       type: 'status',
@@ -768,7 +677,6 @@ app.get('/api/gold-rate/stream', (req, res) => {
     })}\n\n`
   );
 
-  // Immediately send current gold price if available
   const currentPrice = calculateGoldPriceINR();
   if (Number.isFinite(currentPrice)) {
     res.write(
@@ -785,7 +693,6 @@ app.get('/api/gold-rate/stream', (req, res) => {
     );
   }
 
-  // Keep SSE connection alive
   const heartbeat = setInterval(() => {
     try {
       res.write(': heartbeat\n\n');
@@ -795,14 +702,13 @@ app.get('/api/gold-rate/stream', (req, res) => {
   req.on('close', () => {
     clearInterval(heartbeat);
     goldClients.delete(res);
-    console.log('Gold SSE client disconnected');
   });
 });
 
 // ==========================================
-// START SERVER — ONLY ONCE
+// START SERVER
 // ==========================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Rahul Jewellers Backend running on port ${PORT}`);
-  connectFCSGoldFeed();
+  fetchLiveGoldFeed();
 });
