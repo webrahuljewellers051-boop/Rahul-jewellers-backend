@@ -10,7 +10,7 @@ import dns from 'dns';
 import { GoogleGenAI } from '@google/genai';
 import schemeRoutes from './routes/schemeRoutes.js';
 import './services/cronService.js';
-import fetch from 'node-fetch'; // Standard HTTP fetch for reliable live rates
+import fetch from 'node-fetch';
 
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 dotenv.config();
@@ -24,10 +24,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'RahulJewellers_JWT_Secret_2026_Cha
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // ==========================================
-// LIVE GOLD RATE - HTTP REST POLLING FEED
+// EXCLUSIVE 22K LIVE GOLD RATE REST POLLING
 // ==========================================
-
-const FCS_API_KEY = process.env.FCS_SOCKET_API_KEY || 'dnEgxoPwiPGDOmj76F071';
 const TROY_OUNCE_GRAMS = 31.1034768;
 
 let goldUsd = 2650; // Fallback initial market value
@@ -35,28 +33,31 @@ let usdInr = 86.5;   // Fallback initial FX rate
 let goldLastUpdated = Date.now();
 let fxLastUpdated = Date.now();
 let goldClients = new Set();
-let fcsConnected = true;
+let apiConnected = true;
 
-// Calculate 24K INR per gram
-function calculateGoldPriceINR() {
+// Calculate 22K INR per gram exclusively: (Spot / 31.1034) * (USDINR) * (22/24)
+function calculate22KGoldPriceINR() {
   if (!Number.isFinite(goldUsd) || !Number.isFinite(usdInr)) {
     return null;
   }
-  return (goldUsd * usdInr) / TROY_OUNCE_GRAMS;
+  const price24KPerGram = (goldUsd * usdInr) / TROY_OUNCE_GRAMS;
+  const price22KPerGram = price24KPerGram * (22 / 24);
+  return price22KPerGram;
 }
 
-// Broadcast rate to connected frontend clients
+// Broadcast 22K rate to connected frontend clients via SSE
 function broadcastGoldRate() {
-  const priceInrPerGram = calculateGoldPriceINR();
-  if (!Number.isFinite(priceInrPerGram)) return;
+  const priceInrPerGram22K = calculate22KGoldPriceINR();
+  if (!Number.isFinite(priceInrPerGram22K)) return;
 
   const payload = JSON.stringify({
     type: 'gold',
-    priceInrPerGram,
+    carat: '22K',
+    priceInrPerGram: priceInrPerGram22K,
     xauUsd: goldUsd,
     usdInr: usdInr,
     timestamp: Date.now(),
-    connected: fcsConnected
+    connected: apiConnected
   });
 
   for (const client of goldClients) {
@@ -68,40 +69,36 @@ function broadcastGoldRate() {
   }
 }
 
-// Fetch live spot rates from FCS API REST endpoint securely
+// Fetch live spot rates securely from an open-access endpoint (goldprice.dev)
 async function fetchLiveGoldFeed() {
   try {
-    // Fetch Gold (XAUUSD)
-    const goldRes = await fetch(`https://fcsapi.com/api-v3/forex/latest?symbol=XAUUSD&access_key=${FCS_API_KEY}`);
-    const goldData = await goldRes.json();
-
-    if (goldData && goldData.status && goldData.response && goldData.response[0]) {
-      goldUsd = parseFloat(goldData.response[0].c);
-      goldLastUpdated = Date.now();
+    const goldRes = await fetch('https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT', {
+      signal: AbortSignal.timeout(10_000)
+    });
+    
+    if (goldRes.ok) {
+      const goldData = await goldRes.json();
+      if (goldData && goldData.symbols && goldData.symbols[0]) {
+        goldUsd = parseFloat(goldData.symbols[0].price);
+        goldLastUpdated = Date.now();
+        apiConnected = true;
+      }
     }
 
-    // Fetch USD/INR Currency Rate
-    const fxRes = await fetch(`https://fcsapi.com/api-v3/forex/latest?symbol=USDINR&access_key=${FCS_API_KEY}`);
-    const fxData = await fxRes.json();
-
-    if (fxData && fxData.status && fxData.response && fxData.response[0]) {
-      usdInr = parseFloat(fxData.response[0].c);
-      fxLastUpdated = Date.now();
-    }
-
-    const currentPrice = calculateGoldPriceINR();
-    if (currentPrice) {
-      console.log(`💰 LIVE 24K GOLD: ₹${currentPrice.toFixed(2)}/g (XAU: $${goldUsd}, USDINR: ₹${usdInr})`);
+    const current22KPrice = calculate22KGoldPriceINR();
+    if (current22KPrice) {
+      console.log(`💰 LIVE 22K GOLD: ₹${current22KPrice.toFixed(2)}/g`);
       broadcastGoldRate();
     }
   } catch (err) {
+    apiConnected = false;
     console.error('❌ Live Gold Feed Fetch Error:', err.message);
   }
 }
 
 // Poll every 30 seconds to keep live rates updated smoothly
 setInterval(fetchLiveGoldFeed, 30000);
-setTimeout(fetchLiveGoldFeed, 2000); // Initial fetch on startup
+setTimeout(fetchLiveGoldFeed, 1000); // Initial fetch on startup
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
@@ -631,32 +628,30 @@ app.post('/api/support/chat', async (req, res) => {
 });
 
 // ==========================================
-// LIVE GOLD RATE API
+// LIVE 22K GOLD RATE API ENDPOINT
 // ==========================================
 app.get('/api/gold-rate', (req, res) => {
-  const priceInrPerGram = calculateGoldPriceINR();
+  const priceInrPerGram = calculate22KGoldPriceINR();
 
   if (!Number.isFinite(priceInrPerGram)) {
     return res.status(503).json({
       success: false,
-      message: 'Live gold feed is not ready yet.',
-      connected: fcsConnected
+      message: 'Live 22K gold feed is not ready yet.',
+      connected: apiConnected
     });
   }
 
   res.json({
     success: true,
+    carat: '22K',
     priceInrPerGram,
-    xauUsd: goldUsd,
-    usdInr,
     goldLastUpdated,
-    fxLastUpdated,
-    connected: fcsConnected
+    connected: apiConnected
   });
 });
 
 // ==========================================
-// LIVE GOLD RATE SSE STREAM
+// LIVE 22K GOLD RATE SSE STREAM ENDPOINT
 // ==========================================
 app.get('/api/gold-rate/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -673,22 +668,19 @@ app.get('/api/gold-rate/stream', (req, res) => {
   res.write(
     `data: ${JSON.stringify({
       type: 'status',
-      connected: fcsConnected
+      connected: apiConnected
     })}\n\n`
   );
 
-  const currentPrice = calculateGoldPriceINR();
+  const currentPrice = calculate22KGoldPriceINR();
   if (Number.isFinite(currentPrice)) {
     res.write(
       `data: ${JSON.stringify({
         type: 'gold',
+        carat: '22K',
         priceInrPerGram: currentPrice,
-        xauUsd: goldUsd,
-        usdInr,
-        goldLastUpdated,
-        fxLastUpdated,
         timestamp: Date.now(),
-        connected: fcsConnected
+        connected: apiConnected
       })}\n\n`
     );
   }
