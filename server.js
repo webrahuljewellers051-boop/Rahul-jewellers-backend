@@ -1,4 +1,7 @@
-
+// Rahul Jewellers Sheoganj — replace jewel-backend/server.js with this file.
+// Required .env: MONGO_URI, JWT_SECRET, ADMIN_EMAIL, RESEND_API_KEY, RESEND_FROM,
+// CORS_ORIGINS (comma-separated customer/admin website origins).
+// Optional: PORT, GEMINI_API_KEY, GEMINI_MODEL.
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
@@ -10,6 +13,8 @@ import rateLimit from 'express-rate-limit';
 import { randomInt, randomBytes, scrypt as scryptCallback, createHash, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { GoogleGenAI } from '@google/genai';
+// Legacy Scheme model/routes were inconsistent and unauthenticated in the uploaded project.
+// Do not import or mount them until they are rewritten to use verified payments.
 
 dotenv.config();
 const app = express();
@@ -19,13 +24,13 @@ const MONGO_URI = process.env.MONGO_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'web.rahuljewellers051@gmail.com').trim().toLowerCase();
 const RESEND_FROM = process.env.RESEND_FROM || 'onboarding@resend.dev';
+// One-time go-live baseline. Set this to the first YYYY-MM you want the 5-day rule
+// enforced for EXISTING scheme accounts. Do not change after going live.
 const SCHEME_DEADLINE_START_MONTH = process.env.SCHEME_DEADLINE_START_MONTH || '2026-12';
-
 if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(SCHEME_DEADLINE_START_MONTH))
   throw new Error('SCHEME_DEADLINE_START_MONTH must be YYYY-MM, e.g. 2026-12.');
 if (!MONGO_URI) throw new Error('MONGO_URI is required.');
 if (!JWT_SECRET || JWT_SECRET.length < 32) throw new Error('Set a strong JWT_SECRET of at least 32 characters.');
-
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 const ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
 const scrypt = promisify(scryptCallback);
@@ -33,7 +38,6 @@ const allowedOrigins = new Set(
   [process.env.CORS_ORIGINS, process.env.CLIENT_ORIGIN, process.env.ADMIN_ORIGIN]
     .filter(Boolean).flatMap(x => x.split(',')).map(x => x.trim().replace(/\/$/, '')).filter(Boolean)
 );
-
 app.use(cors({
   origin(origin, cb) {
     if (!origin || allowedOrigins.has(origin) ||
@@ -47,12 +51,10 @@ app.use(cors({
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(cookieParser());
-
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false,
   message: { success: false, message: 'Too many attempts. Please try again later.' }
 });
-
 class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
@@ -62,9 +64,10 @@ const clean = value => String(value ?? '').trim();
 const safe = (value, limit = 300) => clean(value).slice(0, limit);
 const validId = value => mongoose.isValidObjectId(value);
 const validPhone = value => /^[6-9]\d{9}$/.test(value);
+const normalizeEmail = value => clean(value).toLowerCase();
+const validEmail = value => value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value);
 const validAmount = value => Number.isFinite(value) && value >= 1000 && value <= 1000000;
 const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 function istParts(date, fields) {
   return Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', ...fields })
     .formatToParts(date).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
@@ -82,6 +85,10 @@ function validDate(s) {
   const d = new Date(`${s}T00:00:00.000Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s && s <= istDate();
 }
+// Each customer's due date is the day they joined (e.g. 2nd every month).
+// Five calendar dates are inclusive: 2–6, suspension from 7th 00:00 IST.
+// For joining on 29–31, months with fewer days use the last calendar day.
+// Every later month uses the ORIGINAL anchor day; there is no date drift.
 function monthIndex(ym) {
   const [y, m] = ym.split('-').map(Number);
   return y * 12 + m - 1;
@@ -91,23 +98,50 @@ function monthFromIndex(index) {
   return `${year}-${String(month).padStart(2, '0')}`;
 }
 function shiftMonth(ym, offset) { return monthFromIndex(monthIndex(ym) + offset); }
+function addDaysISO(isoDate, days) {
+  const ms = Date.parse(`${isoDate}T00:00:00.000Z`);
+  return new Date(ms + days * 86400000).toISOString().slice(0, 10);
+}
+function daysBetweenISO(first, second) {
+  return Math.round((Date.parse(`${second}T00:00:00.000Z`) -
+    Date.parse(`${first}T00:00:00.000Z`)) / 86400000);
+}
+function schemeAnchorDay(c) {
+  const stored = Number(c?.schemeAnchorDay || 0);
+  if (Number.isInteger(stored) && stored >= 1 && stored <= 31) return stored;
+  const day = Number(String(c?.startDate || '').slice(8, 10));
+  return Number.isInteger(day) && day >= 1 && day <= 31 ? day : 1;
+}
+function dueDateInMonth(ym, anchorDay) {
+  const [year, month] = ym.split('-').map(Number);
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${ym}-${String(Math.min(anchorDay, last)).padStart(2, '0')}`;
+}
 function schemeCycle(c) { return Number(c?.schemeCycle || 1); }
 function cycleFilter(cycle) {
   return Number(cycle) === 1 ? { $in: [1, null] } : Number(cycle);
 }
 function dueMonthFor(c) {
   if (!c?.schemeJoined || Number(c.paidMonths || 0) >= 12) return null;
-  const base = c.schemeFirstDueMonth || shiftMonth(SCHEME_DEADLINE_START_MONTH, -Number(c.paidMonths || 0));
-  const raw = shiftMonth(base, Number(c.paidMonths || 0));
-  return raw < SCHEME_DEADLINE_START_MONTH ? SCHEME_DEADLINE_START_MONTH : raw;
+  const paid = Number(c.paidMonths || 0);
+  const base = c.schemeFirstDueMonth || shiftMonth(SCHEME_DEADLINE_START_MONTH, -paid);
+  const raw = shiftMonth(base, paid);
+  // Legacy customers are protected from retrospective cancellations at rollout.
+  // Newly joined schemes (v2) begin on the actual joining day, even before rollout.
+  return Number(c.schemeScheduleVersion || 1) >= 2 || raw >= SCHEME_DEADLINE_START_MONTH
+    ? raw : SCHEME_DEADLINE_START_MONTH;
 }
 function schemeDeadlineFor(c) {
   const today = istDate(), status = c?.schemeStatus || (c?.schemeJoined ? 'Active' : 'NotJoined');
   const dueMonth = dueMonthFor(c);
+  const anchorDay = schemeAnchorDay(c);
+  const dueDate = dueMonth ? dueDateInMonth(dueMonth, anchorDay) : null;
+  const graceEndDate = dueDate ? addDaysISO(dueDate, 4) : null;
   const info = {
-    status, todayIST: today, firstDueMonth: c?.schemeFirstDueMonth || null,
-    dueMonth, dueDate: dueMonth ? `${dueMonth}-01` : null,
-    graceEndDate: dueMonth ? `${dueMonth}-05` : null,
+    status, todayIST: today, schemeStartDate: c?.startDate || null,
+    firstDueMonth: c?.schemeFirstDueMonth || null, anchorDay,
+    dueMonth, dueDate, graceEndDate,
+    cancellationDate: graceEndDate ? addDaysISO(graceEndDate, 1) : null,
     graceDays: 5, dueDay: null, daysRemaining: null, stage: 'NOT_JOINED'
   };
   if (status === 'Suspended') info.stage = 'SUSPENDED';
@@ -115,10 +149,10 @@ function schemeDeadlineFor(c) {
   else if (status === 'Refunded') info.stage = 'REFUNDED';
   else if (!c?.schemeJoined) info.stage = 'NOT_JOINED';
   else if (Number(c.paidMonths || 0) >= 12) info.stage = 'COMPLETED';
-  else if (today < info.dueDate) info.stage = 'UPCOMING';
-  else if (today <= info.graceEndDate) {
+  else if (today < dueDate) info.stage = 'UPCOMING';
+  else if (today <= graceEndDate) {
     info.stage = 'DUE';
-    info.dueDay = Number(today.slice(8));
+    info.dueDay = daysBetweenISO(dueDate, today) + 1;
     info.daysRemaining = 5 - info.dueDay;
   } else info.stage = 'OVERDUE';
   return info;
@@ -134,17 +168,16 @@ async function verifyPassword(password, stored) {
     if (!/^[a-f0-9]{32}$/i.test(salt || '') || !/^[a-f0-9]{128}$/i.test(hex || '')) return false;
     return timingSafeEqual(await scrypt(password, salt, 64), Buffer.from(hex, 'hex'));
   }
+  // Legacy plaintext users are upgraded to scrypt on their first successful login.
   const a = Buffer.from(password), b = Buffer.from(stored);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-
 const StoreSettings = mongoose.models.StoreSettings || mongoose.model('StoreSettings', new mongoose.Schema({
   _id: { type: String, default: 'store_config' },
   upiId: { type: String, default: '' },
   merchantName: { type: String, default: 'Rahul Jewellers' },
   qrCodeUrl: { type: String, default: '' }
 }, { timestamps: true }));
-
 const paymentHistorySchema = new mongoose.Schema({
   monthNum: { type: Number, required: true, min: 1, max: 12 },
   amount: { type: Number, required: true },
@@ -153,23 +186,27 @@ const paymentHistorySchema = new mongoose.Schema({
   verifiedAt: { type: Date },
   method: { type: String, default: 'Manual' }
 }, { _id: false });
-
 const userSchema = new mongoose.Schema({
   customerId: { type: String, required: true, unique: true },
   name: { type: String, required: true },
   dob: { type: String, default: '' },
   phone: { type: String, required: true, unique: true },
-  email: { type: String, default: '' },
+  email: { type: String, default: '', trim: true, lowercase: true },
   password: { type: String, required: true, select: false },
   address: { type: String, default: '' },
   schemeJoined: { type: Boolean, default: false },
   schemeJoinedAt: { type: Date },
   schemeStatus: { type: String, enum: ['NotJoined', 'Active', 'Suspended', 'RefundPending', 'Refunded'], default: 'NotJoined' },
   schemeFirstDueMonth: { type: String, default: '' },
+  schemeAnchorDay: { type: Number, default: 0 },
+  schemeScheduleVersion: { type: Number, default: 1 },
+  schemeTermsAcceptedAt: Date,
+  schemeTermsVersion: { type: String, default: '' },
   schemeCycle: { type: Number, default: 1 },
   tokenVersion: { type: Number, default: 0 },
   schemeSuspendedAt: Date,
   schemeSuspendedDueMonth: { type: String, default: '' },
+  schemeSuspendedDueDate: { type: String, default: '' },
   schemeCustomerReason: { type: String, default: '' },
   schemeAdminDecision: { type: String, default: '' },
   schemeRefundAmount: { type: Number, default: 0 },
@@ -186,13 +223,11 @@ const userSchema = new mongoose.Schema({
   wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product' }]
 }, { timestamps: true });
 const User = mongoose.models.User || mongoose.model('User', userSchema);
-
 const Category = mongoose.models.Category || mongoose.model('Category', new mongoose.Schema({
   name: { type: String, required: true },
   description: { type: String, default: '' },
   parentCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }
 }, { timestamps: true }));
-
 const Product = mongoose.models.Product || mongoose.model('Product', new mongoose.Schema({
   title: { type: String, required: true },
   category: { type: String, required: true },
@@ -201,7 +236,6 @@ const Product = mongoose.models.Product || mongoose.model('Product', new mongoos
   price: { type: Number, default: 0 },
   imageUrl: { type: String, required: true }
 }, { timestamps: true }));
-
 const paymentRequestSchema = new mongoose.Schema({
   customer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   customerId: { type: String, required: true },
@@ -211,6 +245,8 @@ const paymentRequestSchema = new mongoose.Schema({
   transactionId: { type: String, required: true, unique: true },
   status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending', index: true },
   reviewedAt: Date, reviewedBy: String, rejectionReason: { type: String, default: '' },
+  // Approval is a bank/UPI verification, independent of whether this payment
+  // is currently applied to the customer's 12-month passbook.
   passbookApplied: { type: Boolean, default: false },
   passbookAdjustments: { type: [{
     action: { type: String, enum: ['PAY', 'UNPAY'], required: true },
@@ -222,7 +258,8 @@ const paymentRequestSchema = new mongoose.Schema({
 paymentRequestSchema.index({ customer: 1, monthNum: 1 },
   { unique: true, partialFilterExpression: { status: 'Pending' } });
 const PaymentRequest = mongoose.models.PaymentRequest || mongoose.model('PaymentRequest', paymentRequestSchema);
-
+// Financial corrections and deletions retain an independent, admin-only audit trail.
+// Passwords are never included in the audit snapshot.
 const AdminAudit = mongoose.models.AdminAudit || mongoose.model('AdminAudit', new mongoose.Schema({
   action: { type: String, required: true, index: true },
   customerRef: { type: mongoose.Schema.Types.ObjectId, index: true },
@@ -232,7 +269,6 @@ const AdminAudit = mongoose.models.AdminAudit || mongoose.model('AdminAudit', ne
   actor: { type: String, default: ADMIN_EMAIL },
   details: mongoose.Schema.Types.Mixed
 }, { timestamps: true }));
-
 const GoldRate = mongoose.models.GoldRate || mongoose.model('GoldRate', new mongoose.Schema({
   _id: { type: String, default: 'published_gold_rate' },
   enabled: { type: Boolean, default: false },
@@ -240,7 +276,6 @@ const GoldRate = mongoose.models.GoldRate || mongoose.model('GoldRate', new mong
   priceInrPerGram: { type: Number, default: 0 },
   updatedBy: { type: String, default: 'admin' }
 }, { timestamps: true }));
-
 function discountEligible(c) {
   if (!c || !c.schemeJoined || (c.schemeStatus && c.schemeStatus !== 'Active') || Number(c.paidMonths || 0) < 12) return false;
   const final = (c.paymentHistory || []).find(p => Number(p.monthNum) === 12);
@@ -256,29 +291,32 @@ function publicCustomer(c) {
   obj.schemeDeadline = schemeDeadlineFor(obj);
   return obj;
 }
-
+// Reconcile lazily on profile/payment/admin reads AND on a server timer.
+// An on-time submitted UPI request protects the customer until verification.
 async function ensureSchemeFresh(customer) {
   if (!customer || !customer.schemeJoined || (customer.schemeStatus && customer.schemeStatus !== 'Active') ||
       Number(customer.paidMonths || 0) >= 12) return customer;
-  const dueMonth = dueMonthFor(customer);
-  if (!dueMonth || dueMonth < SCHEME_DEADLINE_START_MONTH || istDate() <= `${dueMonth}-05`) return customer;
+  const deadline = schemeDeadlineFor(customer);
+  if (deadline.stage !== 'OVERDUE') return customer;
   const pending = await PaymentRequest.find({
     customer: customer._id, schemeCycle: cycleFilter(schemeCycle(customer)),
     monthNum: Number(customer.paidMonths || 0) + 1, status: 'Pending'
   }).select('createdAt').lean();
-  if (pending.some(p => istDate(new Date(p.createdAt)) <= `${dueMonth}-05`)) return customer;
+  if (pending.some(p => istDate(new Date(p.createdAt)) <= deadline.graceEndDate)) return customer;
   const updated = await User.findOneAndUpdate({
     _id: customer._id, paidMonths: Number(customer.paidMonths || 0),
     schemeStatus: 'Active', schemeJoined: true
   }, { $set: {
     schemeStatus: 'Suspended', schemeSuspendedAt: new Date(),
-    schemeSuspendedDueMonth: dueMonth, schemeAdminDecision: 'Awaiting admin review'
+    schemeSuspendedDueMonth: deadline.dueMonth, schemeSuspendedDueDate: deadline.dueDate,
+    schemeAdminDecision: 'Awaiting admin review'
   } }, { new: true });
   if (updated) {
     await AdminAudit.create({ action: 'SCHEME_AUTO_SUSPEND', customerRef: updated._id,
       customerId: updated.customerId, monthNum: Number(updated.paidMonths || 0) + 1,
-      reason: 'No verified installment or on-time pending UPI by day 5',
-      details: { dueMonth, cycle: schemeCycle(updated), deadline: `${dueMonth}-05` } });
+      reason: 'No verified installment or on-time pending UPI within 5 dates of the due date',
+      details: { dueMonth: deadline.dueMonth, dueDate: deadline.dueDate,
+        cycle: schemeCycle(updated), deadline: deadline.graceEndDate } });
     return updated;
   }
   return await User.findById(customer._id) || customer;
@@ -286,7 +324,7 @@ async function ensureSchemeFresh(customer) {
 async function sweepOverdueSchemes() {
   const candidates = await User.find({ schemeJoined: true,
     schemeStatus: 'Active', paidMonths: { $lt: 12 } }).select(
-    '_id customerId paidMonths schemeJoined schemeStatus schemeCycle schemeFirstDueMonth'
+    '_id customerId paidMonths schemeJoined schemeStatus schemeCycle schemeFirstDueMonth schemeAnchorDay schemeScheduleVersion startDate'
   );
   for (const c of candidates) {
     try { await ensureSchemeFresh(c); }
@@ -296,6 +334,7 @@ async function sweepOverdueSchemes() {
 function refundQuoteFromLedger(customer, approved) {
   const approvedUtrs = new Set(approved.map(p => p.transactionId));
   const upi = approved.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  // Old verified UPI entries can predate PaymentRequest records. Do not omit them.
   const legacyUpi = (customer.paymentHistory || []).filter(p =>
     p.method === 'UPI' && !approvedUtrs.has(p.transactionId))
     .reduce((sum, p) => sum + Number(p.amount || 0), 0);
@@ -345,10 +384,12 @@ const customerAuth = wrap(async (req, res, next) => {
   req.customer = customer;
   next();
 });
-
 app.get('/', (_req, res) => res.send('Rahul Jewellers Sheoganj Backend is Running'));
 app.get('/health', (_req, res) => res.json({ success: true, database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' }));
 
+// ============================================================
+// ADMIN EMAIL OTP
+// ============================================================
 const otpStorage = new Map();
 app.post('/api/client/send-email-otp', loginLimiter, wrap(async (req, res) => {
   const email = clean(req.body.email).toLowerCase();
@@ -387,6 +428,9 @@ app.post('/api/client/admin-logout', (_req, res) => {
   res.json({ success: true });
 });
 
+// ============================================================
+// SHOWROOM PRODUCTS: GOLD AND SILVER BOTH ALLOWED
+// ============================================================
 app.get('/api/products', wrap(async (_req, res) => {
   res.json({ success: true, products: await Product.find().sort({ createdAt: -1 }).lean() });
 }));
@@ -426,30 +470,40 @@ app.delete('/api/admin/categories/:id', adminAuth, wrap(async (req, res) => {
   res.json({ success: true, message: 'Category deleted.' });
 }));
 
-async function createCustomer({ name, dob = '', phone, address = '', password, schemeJoined = false,
-                                customInstallment = 10000, startDate = '' }) {
+// ============================================================
+// CUSTOMER REGISTRATION: ACCOUNT IS NOT AUTOMATIC SCHEME JOIN
+// ============================================================
+async function createCustomer({ name, dob = '', phone, email, address = '', password,
+                                schemeJoined = false, customInstallment = 10000,
+                                schemeConsentConfirmed = false }) {
+  const joinedDate = istDate();
   return User.create({
     customerId: `RJ${randomInt(100000000, 1000000000)}`,
-    name, dob, phone, address, password: await hashPassword(password),
+    name, dob, phone, email, address, password: await hashPassword(password),
     schemeJoined, schemeJoinedAt: schemeJoined ? new Date() : undefined,
-    customInstallment, startDate: schemeJoined ? (startDate || istDate()) : '',
+    customInstallment, startDate: schemeJoined ? joinedDate : '',
     schemeStatus: schemeJoined ? 'Active' : 'NotJoined',
-    schemeFirstDueMonth: schemeJoined ? shiftMonth(istDate().slice(0, 7), 1) : '',
+    schemeFirstDueMonth: schemeJoined ? joinedDate.slice(0, 7) : '',
+    schemeAnchorDay: schemeJoined ? Number(joinedDate.slice(8, 10)) : 0,
+    schemeScheduleVersion: 2,
+    schemeTermsAcceptedAt: schemeJoined && schemeConsentConfirmed ? new Date() : undefined,
+    schemeTermsVersion: schemeJoined && schemeConsentConfirmed ? 'rolling-5-day-v1' : '',
     schemeCycle: 1,
     paidMonths: 0, isLaborFree: false, isActive: true
   });
 }
 app.post('/api/customer/register', loginLimiter, wrap(async (req, res) => {
   const name = safe(req.body.name, 100), dob = clean(req.body.dob);
-  const phone = clean(req.body.phone), address = safe(req.body.address, 500);
+  const phone = clean(req.body.phone), email = normalizeEmail(req.body.email);
+  const address = safe(req.body.address, 500);
   const password = String(req.body.password ?? '');
-  if (!name || !validPhone(phone) || !validDate(dob))
-    bad(400, 'Valid name, date of birth (YYYY-MM-DD) and Indian mobile are required.');
+  if (!name || !validPhone(phone) || !validDate(dob) || !validEmail(email))
+    bad(400, 'Valid name, email, date of birth (YYYY-MM-DD) and Indian mobile are required.');
   if (password.length < 8 || password.length > 128) bad(400, 'Password must have 8–128 characters.');
   if (req.body.confirmPassword !== undefined && req.body.confirmPassword !== password)
     bad(400, 'Passwords do not match.');
   if (await User.exists({ phone })) bad(409, 'Mobile number already registered.');
-  const customer = await createCustomer({ name, dob, phone, address, password });
+  const customer = await createCustomer({ name, dob, phone, email, address, password });
   res.status(201).json({ success: true, customer: publicCustomer(customer), token: customerToken(customer) });
 }));
 app.post('/api/customer/login', loginLimiter, wrap(async (req, res) => {
@@ -482,9 +536,15 @@ async function updateCustomerProfile(req, res) {
     c.name = name;
   }
   if (req.body.address !== undefined) c.address = safe(req.body.address, 500);
+  if (req.body.email !== undefined) {
+    const email = normalizeEmail(req.body.email);
+    if (!validEmail(email)) bad(400, 'Enter a valid email address.');
+    c.email = email;
+  }
   if (req.body.dob !== undefined) {
-    if (!validDate(clean(req.body.dob))) bad(400, 'Invalid date of birth.');
-    c.dob = clean(req.body.dob);
+    const dob = clean(req.body.dob);
+    if (dob && !validDate(dob)) bad(400, 'Invalid date of birth.');
+    c.dob = dob;
   }
   if (req.body.phone !== undefined && clean(req.body.phone) !== c.phone) {
     const phone = clean(req.body.phone);
@@ -503,7 +563,7 @@ async function updateCustomerProfile(req, res) {
   }
   await c.save();
   const customer = publicCustomer(c);
-  res.json({ success: true, customer, user: customer });
+  res.json({ success: true, customer, user: customer, token: customerToken(c) });
 }
 app.put('/api/customer/update-profile/:id', customerAuth, wrap(updateCustomerProfile));
 app.put('/api/customer/settings/update', customerAuth, wrap(updateCustomerProfile));
@@ -519,35 +579,46 @@ app.post('/api/customer/wishlist/toggle', customerAuth, wrap(async (req, res) =>
   res.json({ success: true, customer, user: customer });
 }));
 
+// ============================================================
+// GOLD-ONLY 12+1 SCHEME — SEPARATE JOIN ACTION
+// ============================================================
 app.post('/api/customer/join-scheme', customerAuth, wrap(async (req, res) => {
   const amount = Number(req.body.amount ?? req.body.customInstallment);
   if (!validAmount(amount)) bad(400, 'Monthly amount must be ₹1,000 to ₹10,00,000.');
+  if (!validEmail(normalizeEmail(req.customer.email))) bad(400, 'Add a valid email to your profile before joining.');
+  if (req.body.termsAccepted !== true) bad(400, 'Please accept the 5-day deadline, cancellation and refund review terms.');
   if (req.customer.schemeJoined || req.customer.schemeStatus === 'RefundPending' ||
       req.customer.schemeStatus === 'Suspended') bad(409, 'Existing scheme must be reviewed and refunded before starting a new one.');
   const nextCycle = schemeCycle(req.customer) + (req.customer.schemeStatus === 'Refunded' ? 1 : 0);
+  const joinedDate = istDate();
   const updated = await User.findOneAndUpdate(
     { _id: req.customer._id, schemeJoined: { $ne: true }, paidMonths: 0,
       schemeStatus: req.customer.schemeStatus || 'NotJoined' },
     { $set: { schemeJoined: true, schemeJoinedAt: new Date(),
       schemeStatus: 'Active', schemeCycle: nextCycle,
-      schemeFirstDueMonth: shiftMonth(istDate().slice(0, 7), 1),
-      schemeSuspendedAt: null, schemeSuspendedDueMonth: '',
+      schemeFirstDueMonth: joinedDate.slice(0, 7),
+      schemeAnchorDay: Number(joinedDate.slice(8, 10)), schemeScheduleVersion: 2,
+      schemeTermsAcceptedAt: new Date(), schemeTermsVersion: 'rolling-5-day-v1',
+      schemeSuspendedAt: null, schemeSuspendedDueMonth: '', schemeSuspendedDueDate: '',
       schemeCustomerReason: '', schemeAdminDecision: '',
       schemeRefundAmount: 0, schemeRefundReference: '', schemeRefundedAt: null,
       paymentHistory: [], paidMonths: 0,
-      customInstallment: amount, startDate: istDate(), isLaborFree: false } },
+      customInstallment: amount, startDate: joinedDate, isLaborFree: false } },
     { new: true }
   );
   if (!updated) bad(409, 'Scheme state changed. Refresh and try again.');
   res.json({ success: true, customer: publicCustomer(updated), message: 'Gold Scheme joined.' });
 }));
 
+// Customer UTR submission NEVER marks an installment paid automatically.
 app.post('/api/customer/pay-installment', customerAuth, wrap(async (req, res) => {
   const c = req.customer;
   if (req.body.userId && String(req.body.userId) !== String(c._id)) bad(403, 'Not your scheme.');
   if (!c.schemeJoined || c.schemeStatus !== 'Active') bad(409, 'Scheme is suspended or closed. Contact the store for admin review.');
   const deadline = schemeDeadlineFor(c);
-  if (deadline.stage === 'OVERDUE') bad(409, 'Payment deadline passed. Scheme is suspended; contact the showroom.');
+  if (deadline.stage !== 'DUE') bad(409, deadline.stage === 'UPCOMING'
+    ? `Installment opens on ${deadline.dueDate} and closes on ${deadline.graceEndDate}.`
+    : 'Payment deadline passed. Scheme is suspended; contact the showroom.');
   const monthNum = Number(req.body.monthNum), amount = Number(req.body.amount);
   const transactionId = clean(req.body.transactionId ?? req.body.utr).toUpperCase();
   if (!Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12) bad(400, 'Invalid month.');
@@ -578,6 +649,9 @@ app.get('/api/customer/payment-requests', customerAuth, wrap(async (req, res) =>
   res.json({ success: true, requests, paymentRequests: requests });
 }));
 
+// ============================================================
+// ADMIN CUSTOMER DIRECTORY / CREATION / STATUS
+// ============================================================
 app.get('/api/admin/customers', adminAuth, wrap(async (_req, res) => {
   await sweepOverdueSchemes();
   const customers = (await User.find().select('-password').sort({ createdAt: -1 }).lean()).map(publicCustomer);
@@ -585,24 +659,40 @@ app.get('/api/admin/customers', adminAuth, wrap(async (_req, res) => {
 }));
 app.post('/api/admin/create-customer', adminAuth, wrap(async (req, res) => {
   const name = safe(req.body.name, 100), phone = clean(req.body.phone);
+  const email = normalizeEmail(req.body.email);
   const dob = clean(req.body.dob), address = safe(req.body.address, 500);
   const password = String(req.body.password ?? '');
-  if (!name || !validPhone(phone)) bad(400, 'Valid name and Indian mobile required.');
+  if (!name || !validPhone(phone) || !validEmail(email)) bad(400, 'Valid name, email and Indian mobile required.');
   if (dob && !validDate(dob)) bad(400, 'Invalid date of birth.');
   if (password.length < 8 || password.length > 128) bad(400, 'Password must have 8–128 characters.');
   if (await User.exists({ phone })) bad(409, 'Mobile already registered.');
+  // Existing admin passbook form explicitly sends installment AND startDate.
+  // Website registration does NOT automatically join the scheme.
   const join = req.body.schemeJoined === true ||
     (req.body.schemeJoined !== false && req.body.customInstallment != null && Boolean(req.body.startDate));
   const amount = Number(req.body.customInstallment ?? 10000);
-  const startDate = clean(req.body.startDate);
   if (join && !validAmount(amount)) bad(400, 'Invalid monthly installment.');
-  if (join && startDate && !validDate(startDate)) bad(400, 'Invalid start date.');
+  if (join && req.body.schemeConsentConfirmed !== true)
+    bad(400, "Record the customer acceptance of the 5-day cancellation/refund terms.");
   const customer = await createCustomer({
-    name, phone, dob, address, password, schemeJoined: join,
-    customInstallment: join ? amount : 10000, startDate: join ? startDate || istDate() : ''
+    name, phone, email, dob, address, password, schemeJoined: join,
+    customInstallment: join ? amount : 10000,
+    schemeConsentConfirmed: join && req.body.schemeConsentConfirmed === true
   });
   res.status(201).json({ success: true, customer: publicCustomer(customer) });
 }));
+// Existing customers may have been created before email was collected.
+app.put('/api/admin/customers/:id/email', adminAuth, wrap(async (req, res) => {
+  if (!validId(req.params.id)) bad(400, 'Invalid customer ID.');
+  const email = normalizeEmail(req.body.email);
+  if (!validEmail(email)) bad(400, 'Enter a valid customer email address.');
+  const customer = await User.findByIdAndUpdate(req.params.id, { $set: { email } }, { new: true });
+  if (!customer) bad(404, 'Customer not found.');
+  await AdminAudit.create({ action: 'CUSTOMER_EMAIL_UPDATED', customerRef: customer._id,
+    customerId: customer.customerId, reason: 'Admin updated customer contact email' });
+  res.json({ success: true, customer: publicCustomer(customer) });
+}));
+// Secure reset: new password shown once; all previous customer tokens become invalid.
 app.post('/api/admin/customers/:id/reset-password', adminAuth, wrap(async (req, res) => {
   if (!validId(req.params.id)) bad(400, 'Invalid customer ID.');
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$';
@@ -623,7 +713,9 @@ app.put('/api/admin/customer-status/:id', adminAuth, wrap(async (req, res) => {
   if (!customer) bad(404, 'Customer not found.');
   res.json({ success: true, customer: publicCustomer(customer) });
 }));
-
+// The admin can delete test customers even if installments/UPI were recorded.
+// We remove linked requests in the SAME transaction and retain a financial audit.
+// This never refunds or cancels the real UPI/bank transaction.
 app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) => {
   if (!validId(req.params.id)) bad(400, 'Invalid customer ID.');
   const confirmation = clean(req.body?.confirmCustomerId);
@@ -642,6 +734,7 @@ app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) =>
         bad(400, 'Customer ID confirmation does not match. Nothing was deleted.');
       const requests = await PaymentRequest.find({ customer: customer._id }).session(session).lean();
       deletedCustomerId = customer.customerId;
+      // Retain a minimal FINANCIAL snapshot only; no password, name, address or phone.
       const financialSnapshot = {
         schemeJoined: customer.schemeJoined,
         customInstallment: customer.customInstallment,
@@ -671,6 +764,9 @@ app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) =>
     message: 'Customer and linked payment requests deleted. Financial audit retained; no bank refund was made.' });
 }));
 
+// Admin can toggle the LATEST paid month or NEXT unpaid month, including an
+// already-approved UPI payment. This is a PASSBOOK adjustment, NOT a refund.
+// Approved UPI UTRs remain in PaymentRequest and cannot be double-counted.
 app.post('/api/admin/manual-passbook-update', adminAuth, wrap(async (req, res) => {
   const userId = req.body.userId, monthNum = Number(req.body.monthNum);
   const action = clean(req.body.action).toUpperCase();
@@ -687,7 +783,8 @@ app.post('/api/admin/manual-passbook-update', adminAuth, wrap(async (req, res) =
       if (!c) bad(404, 'Customer not found.');
       if (!c.schemeJoined || c.schemeStatus !== 'Active') bad(409, 'Scheme suspended/closed. Resume it in Scheme Alerts first.');
       if (c.isActive === false) bad(403, 'Customer is deactivated. Activate before editing the passbook.');
-      if (action === 'PAY' && schemeDeadlineFor(c).stage === 'OVERDUE') bad(409, 'Due date passed. Resume scheme first.');
+      if (action === 'PAY' && schemeDeadlineFor(c).stage !== 'DUE')
+        bad(409, 'Installment can only be marked paid during its own 5-day window.');
       const paidMonths = Number(c.paidMonths || 0);
       const now = new Date();
       let transactionId = '';
@@ -701,6 +798,8 @@ app.post('/api/admin/manual-passbook-update', adminAuth, wrap(async (req, res) =
         request = await PaymentRequest.findOne({ customer: c._id, schemeCycle: cycleFilter(schemeCycle(c)), monthNum, status: 'Approved' })
           .sort({ reviewedAt: -1 }).session(session);
         if (request) {
+          // Old approved requests may not have this new field yet. In that case
+          // they are considered applied, never silently re-verified.
           if (request.passbookApplied !== false)
             bad(409, 'UPI was already approved/applied. Refresh or contact support before changing it.');
           source = 'UPI_REAPPLIED';
@@ -780,11 +879,15 @@ app.post('/api/admin/manual-passbook-update', adminAuth, wrap(async (req, res) =
         : 'Installment marked paid manually.' });
 }));
 
+// Recent admin changes, including financial corrections and test customer deletion.
 app.get('/api/admin/audit-log', adminAuth, wrap(async (req, res) => {
   const events = await AdminAudit.find().select('-details').sort({ createdAt: -1 }).limit(100).lean();
   res.json({ success: true, events });
 }));
 
+// ============================================================
+// ADMIN PAYMENT REVIEW — MONGODB ATLAS TRANSACTION
+// ============================================================
 app.get('/api/admin/payment-requests', adminAuth, wrap(async (req, res) => {
   const status = clean(req.query.status);
   if (status && !['Pending', 'Approved', 'Rejected'].includes(status)) bad(400, 'Invalid status.');
@@ -799,7 +902,6 @@ app.get('/api/admin/pending-payments', adminAuth, wrap(async (_req, res) => {
     .sort({ createdAt: -1 }).lean();
   res.json({ success: true, requests, paymentRequests: requests });
 }));
-
 async function reviewPayment(req, res, action) {
   const id = req.params.id || req.body.paymentRequestId || req.body.requestId || req.body.id;
   if (!validId(id)) bad(400, 'Valid payment request ID required.');
@@ -863,6 +965,7 @@ app.post('/api/admin/reject-payment', adminAuth, wrap((req, res) => reviewPaymen
 app.post('/api/admin/verify-payment', adminAuth, wrap((req, res) =>
   reviewPayment(req, res, clean(req.body.action).toLowerCase() === 'reject' ? 'Rejected' : 'Approved')));
 
+// Preview only: final making-charge waiver requires next calendar month after installment 12.
 app.post('/api/customer/redeem-scheme', customerAuth, wrap(async (req, res) => {
   if (req.body.userId && String(req.body.userId) !== String(req.customer._id)) bad(403, 'Not your scheme.');
   const standardMakingCharges = Number(req.body.standardMakingCharges || 0);
@@ -882,6 +985,12 @@ app.post('/api/customer/redeem-scheme', customerAuth, wrap(async (req, res) => {
   });
 }));
 
+// ============================================================
+// STORE UPI SETTINGS & WHATSAPP REMINDERS
+// ============================================================
+// ============================================================
+// FIVE-DAY DEADLINE: ADMIN REVIEW / RESUME / REFUND
+// ============================================================
 app.get('/api/admin/scheme-alerts', adminAuth, wrap(async (_req, res) => {
   await sweepOverdueSchemes();
   const customers = await User.find({ schemeStatus: { $in: ['Suspended', 'RefundPending'] } })
@@ -908,16 +1017,19 @@ app.post('/api/admin/scheme/:id/resume', adminAuth, wrap(async (req, res) => {
       const firstDueMonth = shiftMonth(nextDueMonth, -Number(current.paidMonths || 0));
       updated = await User.findOneAndUpdate({ _id: current._id, schemeStatus: 'Suspended' },
         { $set: { schemeStatus: 'Active', schemeFirstDueMonth: firstDueMonth,
+          schemeScheduleVersion: 2, schemeAnchorDay: schemeAnchorDay(current),
           schemeAdminDecision: `Resumed: ${reason}`, schemeCustomerReason: customerExplanation,
-          schemeSuspendedAt: null, schemeSuspendedDueMonth: '' } }, { new: true, session });
+          schemeSuspendedAt: null, schemeSuspendedDueMonth: '', schemeSuspendedDueDate: '' } }, { new: true, session });
       if (!updated) bad(409, 'Scheme status changed. Refresh and retry.');
       await AdminAudit.create([{ action: 'SCHEME_RESUME', customerRef: current._id,
         customerId: current.customerId, reason, details: { customerExplanation, nextDueMonth,
+          nextDueDate: dueDateInMonth(nextDueMonth, schemeAnchorDay(current)),
           previousDueMonth: current.schemeSuspendedDueMonth, cycle: schemeCycle(current) } }], { session });
     });
   } finally { await session.endSession(); }
-  res.json({ success: true, customer: publicCustomer(updated), nextDueMonth,
-    message: `Scheme resumed. Next installment due 1–5 ${nextDueMonth} (IST).` });
+  const nextDueDate = dueDateInMonth(nextDueMonth, schemeAnchorDay(updated));
+  res.json({ success: true, customer: publicCustomer(updated), nextDueMonth, nextDueDate,
+    message: `Scheme resumed. Next installment opens ${nextDueDate}, last day ${addDaysISO(nextDueDate, 4)} (IST).` });
 }));
 
 app.post('/api/admin/scheme/:id/start-refund', adminAuth, wrap(async (req, res) => {
@@ -931,6 +1043,7 @@ app.post('/api/admin/scheme/:id/start-refund', adminAuth, wrap(async (req, res) 
     await session.withTransaction(async () => {
       const c = await User.findById(req.params.id).session(session);
       if (!c || c.schemeStatus !== 'Suspended') bad(409, 'Only suspended schemes can enter refund review.');
+      // Any pending UPI must be resolved before refund so funds cannot be omitted.
       const pending = await PaymentRequest.exists({ customer: c._id,
         schemeCycle: cycleFilter(schemeCycle(c)), status: 'Pending' }).session(session);
       if (pending) bad(409, 'Review pending UPI payments first. Cannot start refund with unresolved UPI.');
@@ -1013,10 +1126,14 @@ app.post('/api/admin/send-whatsapp-reminder', adminAuth, wrap(async (req, res) =
   if (!c || !c.schemeJoined || c.schemeStatus !== 'Active') bad(404, 'Active Gold Scheme subscriber not found.');
   if (Number(c.paidMonths || 0) >= 12) bad(409, 'All installments completed.');
   const month = Number(c.paidMonths || 0) + 1;
-  const message = `नमस्ते ${c.name} जी,\n\nRahul Jewellers Sheoganj Gold Savings Scheme रिमाइंडर।\nCustomer ID: ${c.customerId}\nकिस्त: ${month}/12\nराशि: ₹${Number(c.customInstallment).toLocaleString('en-IN')}\n\n12 किस्तें पूरी करने के अगले महीने Gold Jewellery के Labour/Making Charges पर नियमानुसार 100% छूट।\nधन्यवाद!`;
+  const deadline = schemeDeadlineFor(c);
+  const message = `नमस्ते ${c.name} जी,\n\nRahul Jewellers Sheoganj Gold Savings Scheme रिमाइंडर।\nCustomer ID: ${c.customerId}\nकिस्त: ${month}/12\nराशि: ₹${Number(c.customInstallment).toLocaleString('en-IN')}\nकिस्त शुरू: ${deadline.dueDate}\nअंतिम तारीख: ${deadline.graceEndDate}\n\n5 दिन में किस्त न भरने पर स्कीम सस्पेंड होगी। एडमिन से बात करके ही Resume हो सकेगी।\nधन्यवाद!`;
   res.json({ success: true, url: `https://wa.me/91${c.phone}?text=${encodeURIComponent(message)}` });
 }));
 
+// ============================================================
+// MANUAL ADMIN-PUBLISHED 22K GOLD RATE (NOT AN MCX LIVE FEED)
+// ============================================================
 const goldClients = new Set();
 function goldPayload(rate) {
   return {
@@ -1064,6 +1181,9 @@ app.get('/api/gold-rate/stream', wrap(async (req, res) => {
   req.on('close', () => { clearInterval(heartbeat); goldClients.delete(res); });
 }));
 
+// ============================================================
+// AI SUPPORT CHAT (OPTIONAL)
+// ============================================================
 app.post('/api/support/chat', wrap(async (req, res) => {
   const message = safe(req.body.message, 1500);
   if (!message) bad(400, 'Message required.');
@@ -1078,6 +1198,9 @@ app.post('/api/support/chat', wrap(async (req, res) => {
   res.json({ success: true, reply: response.text || 'Please contact Rahul Jewellers Sheoganj.' });
 }));
 
+// Legacy /api/schemes endpoints are intentionally disabled: the original
+// Scheme.js exported an Express router instead of a Mongoose model, and
+// its payment endpoint could advance due dates without UPI verification.
 app.use('/api/schemes', (_req, res) => res.status(410).json({
   success: false, message: 'Legacy scheme routes disabled. Use verified customer/admin payment APIs.'
 }));
@@ -1094,11 +1217,15 @@ app.use((err, _req, res, _next) => {
 });
 
 mongoose.connect(MONGO_URI).then(async () => {
+  // Existing old passbook accounts have a startDate even when paidMonths is zero.
+  // New independent customer accounts use startDate='', so they remain unjoined.
   await User.updateMany(
     { schemeJoined: { $exists: false },
       $or: [{ paidMonths: { $gt: 0 } }, { startDate: { $type: 'string', $ne: '' } }] },
     { $set: { schemeJoined: true } }
   );
+  // One-time safe migration: existing members get their NEXT unpaid installment
+  // due in the configured go-live month, instead of being cancelled retroactively.
   await User.updateMany({ schemeJoined: true, schemeStatus: { $exists: false } },
     { $set: { schemeStatus: 'Active' } });
   await User.updateMany({ schemeJoined: false, schemeStatus: { $exists: false } },
@@ -1111,7 +1238,8 @@ mongoose.connect(MONGO_URI).then(async () => {
       { schemeFirstDueMonth: { $exists: false } }, { schemeFirstDueMonth: '' }] },
     { $set: { schemeFirstDueMonth: shiftMonth(SCHEME_DEADLINE_START_MONTH, -Number(c.paidMonths || 0)) } });
   }
-  console.log('Five-day scheme deadline go-live month:', SCHEME_DEADLINE_START_MONTH);
+  console.log('Legacy scheme deadline protection month:', SCHEME_DEADLINE_START_MONTH);
+  console.log('New scheme: anchor day is joining day; five calendar dates including start date.');
   await Promise.all([User.init(), PaymentRequest.init()]);
   await sweepOverdueSchemes();
   const schemeSweepTimer = setInterval(() => {
