@@ -1,10 +1,4 @@
 
- // Rahul Jewellers Sheoganj — Backend server.js
-// Required environment variables:
-// MONGO_URI, JWT_SECRET, ADMIN_EMAIL, RESEND_API_KEY,
-// RESEND_FROM, CORS_ORIGINS
-// Optional: PORT, GEMINI_API_KEY, GEMINI_MODEL
-
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
@@ -45,9 +39,7 @@ if (!MONGO_URI) {
 }
 
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
-  throw new Error(
-    'Set a strong JWT_SECRET of at least 32 characters.'
-  );
+  throw new Error('JWT_SECRET must be at least 32 characters.');
 }
 
 const resend = process.env.RESEND_API_KEY
@@ -62,7 +54,7 @@ const ai = process.env.GEMINI_API_KEY
 
 const scrypt = promisify(scryptCallback);
 
-// Accept both new CORS_ORIGINS and existing URL variables.
+// Supports both new and existing Render URL variables.
 const allowedOrigins = new Set(
   [
     process.env.CORS_ORIGINS,
@@ -113,12 +105,14 @@ app.use(
 );
 
 app.use(express.json({ limit: '15mb' }));
+
 app.use(
   express.urlencoded({
     extended: true,
     limit: '15mb'
   })
 );
+
 app.use(cookieParser());
 
 const loginLimiter = rateLimit({
@@ -146,18 +140,20 @@ const bad = (status, message) => {
 const wrap = fn => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
-const clean = value => String(value ?? '').trim();
+const clean = value =>
+  String(value ?? '').trim();
 
 const safe = (value, limit = 300) =>
   clean(value).slice(0, limit);
 
-const validId = value => mongoose.isValidObjectId(value);
+const validId = value =>
+  mongoose.isValidObjectId(value);
 
 const validPhone = value =>
   /^[6-9]\d{9}$/.test(value);
 
 const validAmount = value =>
-  Number.isFinite(value) &&
+  Number.isInteger(value) &&
   value >= 1000 &&
   value <= 1000000;
 
@@ -211,7 +207,6 @@ function validDate(value) {
 
 async function hashPassword(password) {
   const salt = randomBytes(16).toString('hex');
-
   const hash = await scrypt(password, salt, 64);
 
   return `scrypt$${salt}$${hash.toString('hex')}`;
@@ -238,7 +233,7 @@ async function verifyPassword(password, stored) {
     );
   }
 
-  // Upgrade legacy plaintext passwords after successful login.
+  // Upgrade legacy passwords after successful login.
   const first = Buffer.from(password);
   const second = Buffer.from(stored);
 
@@ -339,6 +334,14 @@ const userSchema = new mongoose.Schema(
       required: true,
       select: false
     },
+
+    // Incremented when Admin resets password.
+    // Old customer login tokens become invalid.
+    tokenVersion: {
+      type: Number,
+      default: 0
+    },
+
     address: {
       type: String,
       default: ''
@@ -495,7 +498,11 @@ const paymentRequestSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['Pending', 'Approved', 'Rejected'],
+      enum: [
+        'Pending',
+        'Approved',
+        'Rejected'
+      ],
       default: 'Pending',
       index: true
     },
@@ -524,7 +531,10 @@ paymentRequestSchema.index(
 
 const PaymentRequest =
   mongoose.models.PaymentRequest ||
-  mongoose.model('PaymentRequest', paymentRequestSchema);
+  mongoose.model(
+    'PaymentRequest',
+    paymentRequestSchema
+  );
 
 const GoldRate =
   mongoose.models.GoldRate ||
@@ -558,7 +568,7 @@ const GoldRate =
   );
 
 // ============================================================
-// CUSTOMER / AUTH HELPERS
+// AUTH HELPERS
 // ============================================================
 
 function discountEligible(customer) {
@@ -572,7 +582,9 @@ function discountEligible(customer) {
 
   const finalPayment = (
     customer.paymentHistory || []
-  ).find(payment => Number(payment.monthNum) === 12);
+  ).find(
+    payment => Number(payment.monthNum) === 12
+  );
 
   const date =
     finalPayment?.verifiedAt ||
@@ -580,7 +592,8 @@ function discountEligible(customer) {
 
   return Boolean(
     date &&
-    istMonth(new Date()) > istMonth(new Date(date))
+    istMonth(new Date()) >
+      istMonth(new Date(date))
   );
 }
 
@@ -611,7 +624,8 @@ function customerToken(customer) {
     {
       sub: String(customer._id),
       role: 'customer',
-      type: 'customer'
+      type: 'customer',
+      v: Number(customer.tokenVersion || 0)
     },
     JWT_SECRET,
     { expiresIn: '7d' }
@@ -619,7 +633,8 @@ function customerToken(customer) {
 }
 
 function readToken(req, cookieName) {
-  const authorization = req.headers.authorization;
+  const authorization =
+    req.headers.authorization;
 
   return (
     typeof authorization === 'string' &&
@@ -640,7 +655,10 @@ function adminAuth(req, res, next) {
       });
     }
 
-    const payload = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(
+      token,
+      JWT_SECRET
+    );
 
     if (
       !(
@@ -649,7 +667,8 @@ function adminAuth(req, res, next) {
         (
           !payload.type &&
           !payload.role &&
-          clean(payload.email).toLowerCase() === ADMIN_EMAIL
+          clean(payload.email).toLowerCase() ===
+            ADMIN_EMAIL
         )
       )
     ) {
@@ -668,52 +687,74 @@ function adminAuth(req, res, next) {
   }
 }
 
-const customerAuth = wrap(async (req, res, next) => {
-  const token = readToken(req, 'customer_token');
+const customerAuth = wrap(
+  async (req, res, next) => {
+    const token = readToken(
+      req,
+      'customer_token'
+    );
 
-  if (!token) {
-    bad(401, 'Customer login required.');
+    if (!token) {
+      bad(401, 'Customer login required.');
+    }
+
+    let payload;
+
+    try {
+      payload = jwt.verify(
+        token,
+        JWT_SECRET
+      );
+    } catch {
+      bad(401, 'Customer session expired.');
+    }
+
+    if (
+      payload.type !== 'customer' &&
+      payload.role !== 'customer'
+    ) {
+      bad(403, 'Customer access only.');
+    }
+
+    if (!validId(payload.sub)) {
+      bad(401, 'Invalid customer token.');
+    }
+
+    const customer = await User.findById(
+      payload.sub
+    );
+
+    if (!customer) {
+      bad(401, 'Customer account not found.');
+    }
+
+    if (
+      Number(payload.v || 0) !==
+      Number(customer.tokenVersion || 0)
+    ) {
+      bad(
+        401,
+        'Password changed. Please log in again.'
+      );
+    }
+
+    if (customer.isActive === false) {
+      bad(403, 'Account deactivated.');
+    }
+
+    req.customer = customer;
+    next();
   }
-
-  let payload;
-
-  try {
-    payload = jwt.verify(token, JWT_SECRET);
-  } catch {
-    bad(401, 'Customer session expired.');
-  }
-
-  if (
-    payload.type !== 'customer' &&
-    payload.role !== 'customer'
-  ) {
-    bad(403, 'Customer access only.');
-  }
-
-  if (!validId(payload.sub)) {
-    bad(401, 'Invalid customer token.');
-  }
-
-  const customer = await User.findById(payload.sub);
-
-  if (!customer) {
-    bad(401, 'Customer account not found.');
-  }
-
-  if (customer.isActive === false) {
-    bad(403, 'Account deactivated.');
-  }
-
-  req.customer = customer;
-  next();
-});
+);
 
 // ============================================================
-// HEALTH CHECK
+// HEALTH
 // ============================================================
 
 app.get('/', (_req, res) => {
-  res.send('Rahul Jewellers Sheoganj Backend is Running');
+  res.send(
+    'Rahul Jewellers Sheoganj Backend is Running'
+  );
 });
 
 app.get('/health', (_req, res) => {
@@ -736,29 +777,34 @@ app.post(
   '/api/client/send-email-otp',
   loginLimiter,
   wrap(async (req, res) => {
-    const email = clean(req.body.email).toLowerCase();
+    const email = clean(
+      req.body.email
+    ).toLowerCase();
 
     if (email !== ADMIN_EMAIL) {
       bad(403, 'Unauthorized admin email.');
     }
 
     if (!resend) {
-      bad(503, 'RESEND_API_KEY is not configured.');
+      bad(
+        503,
+        'RESEND_API_KEY is not configured.'
+      );
     }
 
-    const otp = String(randomInt(100000, 1000000));
+    const otp = String(
+      randomInt(100000, 1000000)
+    );
 
     const result = await resend.emails.send({
       from: RESEND_FROM,
       to: [ADMIN_EMAIL],
-      subject: 'Rahul Jewellers Admin Login OTP',
-      html: `
-        <p>
-          Your admin verification code:
-          <strong>${otp}</strong>
-          (valid for 5 minutes).
-        </p>
-      `
+      subject:
+        'Rahul Jewellers Admin Login OTP',
+      html:
+        `<p>Your admin verification code: ` +
+        `<strong>${otp}</strong> ` +
+        `(valid for 5 minutes).</p>`
     });
 
     if (result.error) {
@@ -787,7 +833,10 @@ app.post(
   '/api/client/verify-email-otp',
   loginLimiter,
   wrap(async (req, res) => {
-    const email = clean(req.body.email).toLowerCase();
+    const email = clean(
+      req.body.email
+    ).toLowerCase();
+
     const otp = clean(req.body.otp);
     const record = otpStorage.get(email);
 
@@ -802,14 +851,12 @@ app.post(
 
     record.attempts++;
 
-    const enteredHash = createHash('sha256')
-      .update(otp)
-      .digest();
-
     if (
       !/^\d{6}$/.test(otp) ||
       !timingSafeEqual(
-        enteredHash,
+        createHash('sha256')
+          .update(otp)
+          .digest(),
         Buffer.from(record.hash, 'hex')
       )
     ) {
@@ -848,18 +895,21 @@ app.get(
   }
 );
 
-app.post('/api/client/admin-logout', (_req, res) => {
-  res.clearCookie('admin_token', {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none'
-  });
+app.post(
+  '/api/client/admin-logout',
+  (_req, res) => {
+    res.clearCookie('admin_token', {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none'
+    });
 
-  res.json({ success: true });
-});
+    res.json({ success: true });
+  }
+);
 
 // ============================================================
-// PRODUCTS — GOLD AND SILVER
+// PRODUCTS AND CATEGORIES
 // ============================================================
 
 app.get(
@@ -880,10 +930,24 @@ app.post(
   '/api/admin/products',
   adminAuth,
   wrap(async (req, res) => {
-    const title = safe(req.body.title, 150);
-    const category = safe(req.body.category, 60);
-    const weight = safe(req.body.weight, 80);
-    const imageUrl = clean(req.body.imageUrl);
+    const title = safe(
+      req.body.title,
+      150
+    );
+
+    const category = safe(
+      req.body.category,
+      60
+    );
+
+    const weight = safe(
+      req.body.weight,
+      80
+    );
+
+    const imageUrl = clean(
+      req.body.imageUrl
+    );
 
     const price =
       req.body.price == null ||
@@ -898,7 +962,10 @@ app.post(
       );
     }
 
-    if (!Number.isFinite(price) || price < 0) {
+    if (
+      !Number.isFinite(price) ||
+      price < 0
+    ) {
       bad(400, 'Invalid price.');
     }
 
@@ -909,7 +976,9 @@ app.post(
       bad(400, 'Valid image is required.');
     }
 
-    const categoryId = validId(req.body.categoryId)
+    const categoryId = validId(
+      req.body.categoryId
+    )
       ? req.body.categoryId
       : null;
 
@@ -937,9 +1006,10 @@ app.delete(
       bad(400, 'Invalid product ID.');
     }
 
-    const deleted = await Product.findByIdAndDelete(
-      req.params.id
-    );
+    const deleted =
+      await Product.findByIdAndDelete(
+        req.params.id
+      );
 
     if (!deleted) {
       bad(404, 'Product not found.');
@@ -971,10 +1041,16 @@ app.post(
   '/api/admin/categories',
   adminAuth,
   wrap(async (req, res) => {
-    const name = safe(req.body.name, 100);
+    const name = safe(
+      req.body.name,
+      100
+    );
 
     if (!name) {
-      bad(400, 'Category name is required.');
+      bad(
+        400,
+        'Category name is required.'
+      );
     }
 
     const parentCategory = validId(
@@ -985,14 +1061,22 @@ app.post(
 
     if (
       parentCategory &&
-      !await Category.exists({ _id: parentCategory })
+      !await Category.exists({
+        _id: parentCategory
+      })
     ) {
-      bad(404, 'Parent category not found.');
+      bad(
+        404,
+        'Parent category not found.'
+      );
     }
 
     const category = await Category.create({
       name,
-      description: safe(req.body.description, 400),
+      description: safe(
+        req.body.description,
+        400
+      ),
       parentCategory
     });
 
@@ -1027,12 +1111,16 @@ app.delete(
         parentCategory: req.params.id
       })
     ) {
-      bad(409, 'Delete subcategories first.');
+      bad(
+        409,
+        'Delete subcategories first.'
+      );
     }
 
-    const deleted = await Category.findByIdAndDelete(
-      req.params.id
-    );
+    const deleted =
+      await Category.findByIdAndDelete(
+        req.params.id
+      );
 
     if (!deleted) {
       bad(404, 'Category not found.');
@@ -1060,7 +1148,8 @@ async function createCustomer({
   startDate = ''
 }) {
   return User.create({
-    customerId: `RJ${randomInt(100000000, 1000000000)}`,
+    customerId:
+      `RJ${randomInt(100000000, 1000000000)}`,
     name,
     dob,
     phone,
@@ -1084,11 +1173,22 @@ app.post(
   '/api/customer/register',
   loginLimiter,
   wrap(async (req, res) => {
-    const name = safe(req.body.name, 100);
+    const name = safe(
+      req.body.name,
+      100
+    );
+
     const dob = clean(req.body.dob);
     const phone = clean(req.body.phone);
-    const address = safe(req.body.address, 500);
-    const password = String(req.body.password ?? '');
+
+    const address = safe(
+      req.body.address,
+      500
+    );
+
+    const password = String(
+      req.body.password ?? ''
+    );
 
     if (
       !name ||
@@ -1097,7 +1197,7 @@ app.post(
     ) {
       bad(
         400,
-        'Valid name, date of birth (YYYY-MM-DD) and Indian mobile are required.'
+        'Valid name, date of birth and Indian mobile are required.'
       );
     }
 
@@ -1115,11 +1215,17 @@ app.post(
       req.body.confirmPassword !== undefined &&
       req.body.confirmPassword !== password
     ) {
-      bad(400, 'Passwords do not match.');
+      bad(
+        400,
+        'Passwords do not match.'
+      );
     }
 
     if (await User.exists({ phone })) {
-      bad(409, 'Mobile number already registered.');
+      bad(
+        409,
+        'Mobile number already registered.'
+      );
     }
 
     const customer = await createCustomer({
@@ -1142,8 +1248,13 @@ app.post(
   '/api/customer/login',
   loginLimiter,
   wrap(async (req, res) => {
-    const identifier = clean(req.body.identifier);
-    const password = String(req.body.password ?? '');
+    const identifier = clean(
+      req.body.identifier
+    );
+
+    const password = String(
+      req.body.password ?? ''
+    );
 
     if (!identifier || !password) {
       bad(
@@ -1156,13 +1267,12 @@ app.post(
       $or: [
         {
           customerId: {
-            $regex: `^${escapeRegex(identifier)}$`,
+            $regex:
+              `^${escapeRegex(identifier)}$`,
             $options: 'i'
           }
         },
-        {
-          phone: identifier
-        }
+        { phone: identifier }
       ]
     }).select('+password');
 
@@ -1173,18 +1283,25 @@ app.post(
         customer.password
       )
     ) {
-      bad(401, 'Incorrect login details.');
+      bad(
+        401,
+        'Incorrect login details.'
+      );
     }
 
     if (customer.isActive === false) {
       bad(
         403,
-        'Account deactivated. Contact Rahul Jewellers Sheoganj.'
+        'Account deactivated.'
       );
     }
 
-    if (!customer.password.startsWith('scrypt$')) {
-      customer.password = await hashPassword(password);
+    if (
+      !customer.password.startsWith('scrypt$')
+    ) {
+      customer.password =
+        await hashPassword(password);
+
       await customer.save();
     }
 
@@ -1201,9 +1318,13 @@ app.get(
   customerAuth,
   wrap(async (req, res) => {
     if (
-      String(req.customer._id) !== req.params.id
+      String(req.customer._id) !==
+      req.params.id
     ) {
-      bad(403, 'Access denied to this profile.');
+      bad(
+        403,
+        'Access denied to this profile.'
+      );
     }
 
     res.json({
@@ -1224,26 +1345,41 @@ async function updateCustomerProfile(req, res) {
     id &&
     String(id) !== String(customer._id)
   ) {
-    bad(403, 'You can only edit your account.');
+    bad(
+      403,
+      'You can only edit your account.'
+    );
   }
 
   if (req.body.name !== undefined) {
-    const name = safe(req.body.name, 100);
+    const name = safe(
+      req.body.name,
+      100
+    );
 
     if (!name) {
-      bad(400, 'Name cannot be empty.');
+      bad(
+        400,
+        'Name cannot be empty.'
+      );
     }
 
     customer.name = name;
   }
 
   if (req.body.address !== undefined) {
-    customer.address = safe(req.body.address, 500);
+    customer.address = safe(
+      req.body.address,
+      500
+    );
   }
 
   if (req.body.dob !== undefined) {
     if (!validDate(clean(req.body.dob))) {
-      bad(400, 'Invalid date of birth.');
+      bad(
+        400,
+        'Invalid date of birth.'
+      );
     }
 
     customer.dob = clean(req.body.dob);
@@ -1253,26 +1389,39 @@ async function updateCustomerProfile(req, res) {
     req.body.phone !== undefined &&
     clean(req.body.phone) !== customer.phone
   ) {
-    const phone = clean(req.body.phone);
+    const phone = clean(
+      req.body.phone
+    );
 
     if (!validPhone(phone)) {
-      bad(400, 'Invalid Indian mobile.');
+      bad(
+        400,
+        'Invalid Indian mobile.'
+      );
     }
 
     if (
       await User.exists({
         phone,
-        _id: { $ne: customer._id }
+        _id: {
+          $ne: customer._id
+        }
       })
     ) {
-      bad(409, 'Mobile already registered.');
+      bad(
+        409,
+        'Mobile already registered.'
+      );
     }
 
     customer.phone = phone;
   }
 
   if (req.body.password) {
-    const newPassword = String(req.body.password);
+    const newPassword = String(
+      req.body.password
+    );
+
     const currentPassword = String(
       req.body.currentPassword || ''
     );
@@ -1290,7 +1439,7 @@ async function updateCustomerProfile(req, res) {
     if (!currentPassword) {
       bad(
         400,
-        'Current password required to change password.'
+        'Current password required.'
       );
     }
 
@@ -1305,10 +1454,14 @@ async function updateCustomerProfile(req, res) {
         existing.password
       )
     ) {
-      bad(401, 'Current password incorrect.');
+      bad(
+        401,
+        'Current password incorrect.'
+      );
     }
 
-    customer.password = await hashPassword(newPassword);
+    customer.password =
+      await hashPassword(newPassword);
   }
 
   await customer.save();
@@ -1346,28 +1499,38 @@ app.post(
       bad(403, 'Access denied.');
     }
 
-    const productId = req.body.productId;
+    const productId =
+      req.body.productId;
 
     if (
       !validId(productId) ||
-      !await Product.exists({ _id: productId })
+      !await Product.exists({
+        _id: productId
+      })
     ) {
       bad(404, 'Product not found.');
     }
 
     if (
       req.customer.wishlist.some(
-        id => String(id) === String(productId)
+        id => String(id) ===
+          String(productId)
       )
     ) {
-      req.customer.wishlist.pull(productId);
+      req.customer.wishlist.pull(
+        productId
+      );
     } else {
-      req.customer.wishlist.addToSet(productId);
+      req.customer.wishlist.addToSet(
+        productId
+      );
     }
 
     await req.customer.save();
 
-    const customer = publicCustomer(req.customer);
+    const customer = publicCustomer(
+      req.customer
+    );
 
     res.json({
       success: true,
@@ -1380,9 +1543,6 @@ app.post(
 // ============================================================
 // GOLD-ONLY 12+1 SCHEME
 // ============================================================
-
-// Customer creates account first, then separately joins scheme.
-// The chosen monthly installment amount is locked after joining.
 
 app.post(
   '/api/customer/join-scheme',
@@ -1401,26 +1561,30 @@ app.post(
     }
 
     if (req.customer.schemeJoined) {
-      bad(409, 'Already joined the Gold Scheme.');
+      bad(
+        409,
+        'Already joined the Gold Scheme.'
+      );
     }
 
-    const updated = await User.findOneAndUpdate(
-      {
-        _id: req.customer._id,
-        schemeJoined: { $ne: true },
-        paidMonths: 0
-      },
-      {
-        $set: {
-          schemeJoined: true,
-          schemeJoinedAt: new Date(),
-          customInstallment: amount,
-          startDate: istDate(),
-          isLaborFree: false
-        }
-      },
-      { new: true }
-    );
+    const updated =
+      await User.findOneAndUpdate(
+        {
+          _id: req.customer._id,
+          schemeJoined: { $ne: true },
+          paidMonths: 0
+        },
+        {
+          $set: {
+            schemeJoined: true,
+            schemeJoinedAt: new Date(),
+            customInstallment: amount,
+            startDate: istDate(),
+            isLaborFree: false
+          }
+        },
+        { new: true }
+      );
 
     if (!updated) {
       bad(
@@ -1438,7 +1602,7 @@ app.post(
 );
 
 // ============================================================
-// CUSTOMER UPI PAYMENT — PENDING UNTIL ADMIN APPROVAL
+// CUSTOMER PAYMENT SUBMISSION
 // ============================================================
 
 app.post(
@@ -1456,11 +1620,19 @@ app.post(
     }
 
     if (!customer.schemeJoined) {
-      bad(409, 'Join Gold Scheme first.');
+      bad(
+        409,
+        'Join Gold Scheme first.'
+      );
     }
 
-    const monthNum = Number(req.body.monthNum);
-    const amount = Number(req.body.amount);
+    const monthNum = Number(
+      req.body.monthNum
+    );
+
+    const amount = Number(
+      req.body.amount
+    );
 
     const transactionId = clean(
       req.body.transactionId ??
@@ -1481,32 +1653,41 @@ app.post(
     ) {
       bad(
         409,
-        'Only the next unpaid installment can be submitted.'
+        'Only next unpaid installment can be submitted.'
       );
     }
 
     if (
-      amount !== Number(customer.customInstallment)
+      amount !==
+      Number(customer.customInstallment)
     ) {
       bad(
         400,
-        'Amount must match your monthly installment.'
+        'Amount must match monthly installment.'
       );
     }
 
-    if (!/^[A-Z0-9]{10,20}$/.test(transactionId)) {
+    if (
+      !/^[A-Z0-9]{10,20}$/.test(
+        transactionId
+      )
+    ) {
       bad(
         400,
-        'UTR must contain 10–20 letters/digits.'
+        'Invalid UTR. Use 10–20 letters/digits.'
       );
     }
 
     if (
       await User.exists({
-        'paymentHistory.transactionId': transactionId
+        'paymentHistory.transactionId':
+          transactionId
       })
     ) {
-      bad(409, 'UTR already verified.');
+      bad(
+        409,
+        'UTR already verified.'
+      );
     }
 
     if (
@@ -1518,24 +1699,26 @@ app.post(
     ) {
       bad(
         409,
-        'A payment for this month is already pending review.'
+        'Payment already pending review.'
       );
     }
 
-    const paymentRequest = await PaymentRequest.create({
-      customer: customer._id,
-      customerId: customer.customerId,
-      monthNum,
-      amount,
-      transactionId
-    });
+    const paymentRequest =
+      await PaymentRequest.create({
+        customer: customer._id,
+        customerId:
+          customer.customerId,
+        monthNum,
+        amount,
+        transactionId
+      });
 
     res.status(201).json({
       success: true,
       verified: false,
       status: 'Pending',
       message:
-        'Submitted for admin verification. Your paid months have NOT increased yet.',
+        'Payment submitted for admin verification.',
       paymentRequest,
       request: paymentRequest,
       customer: publicCustomer(customer)
@@ -1547,11 +1730,12 @@ app.get(
   '/api/customer/payment-requests',
   customerAuth,
   wrap(async (req, res) => {
-    const requests = await PaymentRequest.find({
-      customer: req.customer._id
-    })
-      .sort({ createdAt: -1 })
-      .lean();
+    const requests =
+      await PaymentRequest.find({
+        customer: req.customer._id
+      })
+        .sort({ createdAt: -1 })
+        .lean();
 
     res.json({
       success: true,
@@ -1584,25 +1768,116 @@ app.get(
   })
 );
 
+// ============================================================
+// ADMIN RESET CUSTOMER PASSWORD
+// ============================================================
+
+app.post(
+  '/api/admin/customers/:id/reset-password',
+  adminAuth,
+  loginLimiter,
+  wrap(async (req, res) => {
+    if (!validId(req.params.id)) {
+      bad(
+        400,
+        'Invalid customer ID.'
+      );
+    }
+
+    const customer =
+      await User.findById(
+        req.params.id
+      ).select('+password');
+
+    if (!customer) {
+      bad(
+        404,
+        'Customer not found.'
+      );
+    }
+
+    // Create a new password.
+    // Never return the old password.
+    const temporaryPassword =
+      randomBytes(18)
+        .toString('base64url');
+
+    customer.password =
+      await hashPassword(
+        temporaryPassword
+      );
+
+    customer.tokenVersion =
+      Number(
+        customer.tokenVersion || 0
+      ) + 1;
+
+    await customer.save();
+
+    res.setHeader(
+      'Cache-Control',
+      'no-store'
+    );
+
+    res.json({
+      success: true,
+      message:
+        'Password reset successfully.',
+      customerId:
+        customer.customerId,
+      temporaryPassword
+    });
+  })
+);
+
+// ============================================================
+// ADMIN CREATE CUSTOMER
+// ============================================================
+
 app.post(
   '/api/admin/create-customer',
   adminAuth,
   wrap(async (req, res) => {
-    const name = safe(req.body.name, 100);
-    const phone = clean(req.body.phone);
-    const dob = clean(req.body.dob);
-    const address = safe(req.body.address, 500);
-    const password = String(req.body.password ?? '');
+    const name = safe(
+      req.body.name,
+      100
+    );
 
-    if (!name || !validPhone(phone)) {
+    const phone = clean(
+      req.body.phone
+    );
+
+    const dob = clean(
+      req.body.dob
+    );
+
+    const address = safe(
+      req.body.address,
+      500
+    );
+
+    const password = String(
+      req.body.password ?? ''
+    );
+
+    if (
+      !name ||
+      !validPhone(phone)
+    ) {
       bad(
         400,
-        'Valid name and Indian mobile required.'
+        'Valid name and mobile required.'
       );
     }
 
-    if (dob && !validDate(dob)) {
-      bad(400, 'Invalid date of birth.');
+    if (
+      dob &&
+      !validDate(dob)
+    ) {
+      bad(
+        400,
+        'Invalid date of birth.'
+      );
     }
 
     if (
@@ -1615,8 +1890,13 @@ app.post(
       );
     }
 
-    if (await User.exists({ phone })) {
-      bad(409, 'Mobile already registered.');
+    if (
+      await User.exists({ phone })
+    ) {
+      bad(
+        409,
+        'Mobile already registered.'
+      );
     }
 
     const join =
@@ -1631,10 +1911,18 @@ app.post(
       req.body.customInstallment ?? 10000
     );
 
-    const startDate = clean(req.body.startDate);
+    const startDate = clean(
+      req.body.startDate
+    );
 
-    if (join && !validAmount(amount)) {
-      bad(400, 'Invalid monthly installment.');
+    if (
+      join &&
+      !validAmount(amount)
+    ) {
+      bad(
+        400,
+        'Invalid monthly installment.'
+      );
     }
 
     if (
@@ -1642,21 +1930,26 @@ app.post(
       startDate &&
       !validDate(startDate)
     ) {
-      bad(400, 'Invalid start date.');
+      bad(
+        400,
+        'Invalid start date.'
+      );
     }
 
-    const customer = await createCustomer({
-      name,
-      phone,
-      dob,
-      address,
-      password,
-      schemeJoined: join,
-      customInstallment: join ? amount : 10000,
-      startDate: join
-        ? startDate || istDate()
-        : ''
-    });
+    const customer =
+      await createCustomer({
+        name,
+        phone,
+        dob,
+        address,
+        password,
+        schemeJoined: join,
+        customInstallment:
+          join ? amount : 10000,
+        startDate: join
+          ? startDate || istDate()
+          : ''
+      });
 
     res.status(201).json({
       success: true,
@@ -1671,22 +1964,30 @@ app.put(
   wrap(async (req, res) => {
     if (
       !validId(req.params.id) ||
-      typeof req.body.isActive !== 'boolean'
+      typeof req.body.isActive !==
+        'boolean'
     ) {
       bad(
         400,
-        'Valid ID and isActive boolean required.'
+        'Valid ID and isActive required.'
       );
     }
 
-    const customer = await User.findByIdAndUpdate(
-      req.params.id,
-      { isActive: req.body.isActive },
-      { new: true }
-    );
+    const customer =
+      await User.findByIdAndUpdate(
+        req.params.id,
+        {
+          isActive:
+            req.body.isActive
+        },
+        { new: true }
+      );
 
     if (!customer) {
-      bad(404, 'Customer not found.');
+      bad(
+        404,
+        'Customer not found.'
+      );
     }
 
     res.json({
@@ -1701,26 +2002,35 @@ app.delete(
   adminAuth,
   wrap(async (req, res) => {
     if (!validId(req.params.id)) {
-      bad(400, 'Invalid customer ID.');
+      bad(
+        400,
+        'Invalid customer ID.'
+      );
     }
 
-    const customer = await User.findById(
-      req.params.id
-    );
+    const customer =
+      await User.findById(
+        req.params.id
+      );
 
     if (!customer) {
-      bad(404, 'Customer not found.');
+      bad(
+        404,
+        'Customer not found.'
+      );
     }
 
     if (
-      Number(customer.paidMonths || 0) > 0 ||
+      Number(
+        customer.paidMonths || 0
+      ) > 0 ||
       await PaymentRequest.exists({
         customer: customer._id
       })
     ) {
       bad(
         409,
-        'Financial records exist. Deactivate this customer instead of deleting.'
+        'Financial records exist. Deactivate instead.'
       );
     }
 
@@ -1743,9 +2053,16 @@ app.post(
   '/api/admin/manual-passbook-update',
   adminAuth,
   wrap(async (req, res) => {
-    const userId = req.body.userId;
-    const monthNum = Number(req.body.monthNum);
-    const action = clean(req.body.action).toUpperCase();
+    const userId =
+      req.body.userId;
+
+    const monthNum = Number(
+      req.body.monthNum
+    );
+
+    const action = clean(
+      req.body.action
+    ).toUpperCase();
 
     if (
       !validId(userId) ||
@@ -1754,13 +2071,20 @@ app.post(
       monthNum > 12 ||
       !['PAY', 'UNPAY'].includes(action)
     ) {
-      bad(400, 'Invalid passbook action.');
+      bad(
+        400,
+        'Invalid passbook action.'
+      );
     }
 
-    const customer = await User.findById(userId);
+    const customer =
+      await User.findById(userId);
 
     if (!customer) {
-      bad(404, 'Customer not found.');
+      bad(
+        404,
+        'Customer not found.'
+      );
     }
 
     if (!customer.schemeJoined) {
@@ -1770,14 +2094,21 @@ app.post(
       );
     }
 
-    if (customer.isActive === false) {
-      bad(403, 'Customer is deactivated.');
+    if (
+      customer.isActive === false
+    ) {
+      bad(
+        403,
+        'Customer deactivated.'
+      );
     }
 
     if (action === 'PAY') {
       if (
         monthNum !==
-        Number(customer.paidMonths || 0) + 1
+        Number(
+          customer.paidMonths || 0
+        ) + 1
       ) {
         bad(
           409,
@@ -1794,39 +2125,43 @@ app.post(
       ) {
         bad(
           409,
-          'UPI request pending. Approve/reject it first.'
+          'UPI request pending. Review it first.'
         );
       }
 
       const now = new Date();
 
-      const updated = await User.findOneAndUpdate(
-        {
-          _id: customer._id,
-          paidMonths: monthNum - 1,
-          schemeJoined: true
-        },
-        {
-          $inc: {
-            paidMonths: 1
+      const updated =
+        await User.findOneAndUpdate(
+          {
+            _id: customer._id,
+            paidMonths:
+              monthNum - 1,
+            schemeJoined: true
           },
-          $push: {
-            paymentHistory: {
-              monthNum,
-              amount: customer.customInstallment,
-              transactionId:
-                `ADMIN_MANUAL_${Date.now()}_${randomInt(1000, 9999)}`,
-              paidAt: now,
-              verifiedAt: now,
-              method: 'AdminManual'
+          {
+            $inc: {
+              paidMonths: 1
+            },
+            $push: {
+              paymentHistory: {
+                monthNum,
+                amount:
+                  customer.customInstallment,
+                transactionId:
+                  `ADMIN_MANUAL_${Date.now()}_${randomInt(1000, 9999)}`,
+                paidAt: now,
+                verifiedAt: now,
+                method:
+                  'AdminManual'
+              }
+            },
+            $set: {
+              isLaborFree: false
             }
           },
-          $set: {
-            isLaborFree: false
-          }
-        },
-        { new: true }
-      );
+          { new: true }
+        );
 
       if (!updated) {
         bad(
@@ -1837,12 +2172,16 @@ app.post(
 
       return res.json({
         success: true,
-        customer: publicCustomer(updated)
+        customer:
+          publicCustomer(updated)
       });
     }
 
     if (
-      monthNum !== Number(customer.paidMonths || 0)
+      monthNum !==
+      Number(
+        customer.paidMonths || 0
+      )
     ) {
       bad(
         409,
@@ -1859,28 +2198,31 @@ app.post(
     ) {
       bad(
         409,
-        'Approved UPI payment cannot be reversed here; use audited refund process.'
+        'Approved UPI payment cannot be reversed here.'
       );
     }
 
-    const updated = await User.findOneAndUpdate(
-      {
-        _id: customer._id,
-        paidMonths: monthNum
-      },
-      {
-        $inc: {
-          paidMonths: -1
+    const updated =
+      await User.findOneAndUpdate(
+        {
+          _id: customer._id,
+          paidMonths: monthNum
         },
-        $pull: {
-          paymentHistory: { monthNum }
+        {
+          $inc: {
+            paidMonths: -1
+          },
+          $pull: {
+            paymentHistory: {
+              monthNum
+            }
+          },
+          $set: {
+            isLaborFree: false
+          }
         },
-        $set: {
-          isLaborFree: false
-        }
-      },
-      { new: true }
-    );
+        { new: true }
+      );
 
     if (!updated) {
       bad(
@@ -1891,37 +2233,48 @@ app.post(
 
     res.json({
       success: true,
-      customer: publicCustomer(updated)
+      customer:
+        publicCustomer(updated)
     });
   })
 );
 
 // ============================================================
-// ADMIN PAYMENT REVIEW
+// ADMIN PAYMENT REQUESTS
 // ============================================================
 
 app.get(
   '/api/admin/payment-requests',
   adminAuth,
   wrap(async (req, res) => {
-    const status = clean(req.query.status);
+    const status = clean(
+      req.query.status
+    );
 
     if (
       status &&
-      !['Pending', 'Approved', 'Rejected'].includes(status)
+      ![
+        'Pending',
+        'Approved',
+        'Rejected'
+      ].includes(status)
     ) {
-      bad(400, 'Invalid status.');
+      bad(
+        400,
+        'Invalid payment status.'
+      );
     }
 
-    const requests = await PaymentRequest.find(
-      status ? { status } : {}
-    )
-      .populate(
-        'customer',
-        'customerId name phone paidMonths customInstallment isActive schemeJoined'
+    const requests =
+      await PaymentRequest.find(
+        status ? { status } : {}
       )
-      .sort({ createdAt: -1 })
-      .lean();
+        .populate(
+          'customer',
+          'customerId name phone paidMonths customInstallment isActive schemeJoined'
+        )
+        .sort({ createdAt: -1 })
+        .lean();
 
     res.json({
       success: true,
@@ -1935,15 +2288,16 @@ app.get(
   '/api/admin/pending-payments',
   adminAuth,
   wrap(async (_req, res) => {
-    const requests = await PaymentRequest.find({
-      status: 'Pending'
-    })
-      .populate(
-        'customer',
-        'customerId name phone paidMonths customInstallment'
-      )
-      .sort({ createdAt: -1 })
-      .lean();
+    const requests =
+      await PaymentRequest.find({
+        status: 'Pending'
+      })
+        .populate(
+          'customer',
+          'customerId name phone paidMonths customInstallment'
+        )
+        .sort({ createdAt: -1 })
+        .lean();
 
     res.json({
       success: true,
@@ -1953,7 +2307,11 @@ app.get(
   })
 );
 
-async function reviewPayment(req, res, action) {
+async function reviewPayment(
+  req,
+  res,
+  action
+) {
   const id =
     req.params.id ||
     req.body.paymentRequestId ||
@@ -1961,7 +2319,10 @@ async function reviewPayment(req, res, action) {
     req.body.id;
 
   if (!validId(id)) {
-    bad(400, 'Valid payment request ID required.');
+    bad(
+      400,
+      'Valid payment request ID required.'
+    );
   }
 
   if (action === 'Rejected') {
@@ -1979,8 +2340,10 @@ async function reviewPayment(req, res, action) {
               req.body.rejectionReason,
               300
             ),
-            reviewedAt: new Date(),
-            reviewedBy: ADMIN_EMAIL
+            reviewedAt:
+              new Date(),
+            reviewedBy:
+              ADMIN_EMAIL
           }
         },
         { new: true }
@@ -2000,132 +2363,154 @@ async function reviewPayment(req, res, action) {
     });
   }
 
-  const session = await mongoose.startSession();
+  const session =
+    await mongoose.startSession();
 
   let paymentRequest;
   let customer;
 
   try {
-    await session.withTransaction(async () => {
-      const request = await PaymentRequest.findOne({
-        _id: id,
-        status: 'Pending'
-      }).session(session);
-
-      if (!request) {
-        bad(
-          409,
-          'Payment request already reviewed.'
-        );
-      }
-
-      const existingCustomer = await User.findById(
-        request.customer
-      ).session(session);
-
-      if (
-        !existingCustomer ||
-        existingCustomer.isActive === false ||
-        !existingCustomer.schemeJoined
-      ) {
-        bad(409, 'Customer not eligible.');
-      }
-
-      if (
-        Number(existingCustomer.paidMonths || 0) + 1 !==
-        request.monthNum
-      ) {
-        bad(
-          409,
-          'Not the next unpaid installment.'
-        );
-      }
-
-      if (
-        Number(existingCustomer.customInstallment) !==
-        request.amount
-      ) {
-        bad(
-          409,
-          'Installment amount mismatch.'
-        );
-      }
-
-      if (
-        await User.exists({
-          'paymentHistory.transactionId':
-            request.transactionId
-        }).session(session)
-      ) {
-        bad(409, 'UTR already verified.');
-      }
-
-      const now = new Date();
-
-      customer = await User.findOneAndUpdate(
-        {
-          _id: existingCustomer._id,
-          schemeJoined: true,
-          isActive: { $ne: false },
-          paidMonths: request.monthNum - 1
-        },
-        {
-          $inc: {
-            paidMonths: 1
-          },
-          $push: {
-            paymentHistory: {
-              monthNum: request.monthNum,
-              amount: request.amount,
-              transactionId: request.transactionId,
-              paidAt: request.createdAt,
-              verifiedAt: now,
-              method: 'UPI'
-            }
-          },
-          $set: {
-            isLaborFree: false
-          }
-        },
-        {
-          new: true,
-          session
-        }
-      );
-
-      if (!customer) {
-        bad(
-          409,
-          'Passbook changed. Refresh and retry.'
-        );
-      }
-
-      paymentRequest =
-        await PaymentRequest.findOneAndUpdate(
-          {
+    await session.withTransaction(
+      async () => {
+        const request =
+          await PaymentRequest.findOne({
             _id: id,
             status: 'Pending'
-          },
-          {
-            $set: {
-              status: 'Approved',
-              reviewedAt: now,
-              reviewedBy: ADMIN_EMAIL
-            }
-          },
-          {
-            new: true,
-            session
-          }
-        );
+          }).session(session);
 
-      if (!paymentRequest) {
-        bad(
-          409,
-          'Payment request already reviewed.'
-        );
+        if (!request) {
+          bad(
+            409,
+            'Payment request already reviewed.'
+          );
+        }
+
+        const existingCustomer =
+          await User.findById(
+            request.customer
+          ).session(session);
+
+        if (
+          !existingCustomer ||
+          existingCustomer.isActive === false ||
+          !existingCustomer.schemeJoined
+        ) {
+          bad(
+            409,
+            'Customer not eligible.'
+          );
+        }
+
+        if (
+          Number(
+            existingCustomer.paidMonths || 0
+          ) + 1 !== request.monthNum
+        ) {
+          bad(
+            409,
+            'Not the next unpaid installment.'
+          );
+        }
+
+        if (
+          Number(
+            existingCustomer.customInstallment
+          ) !== request.amount
+        ) {
+          bad(
+            409,
+            'Installment amount mismatch.'
+          );
+        }
+
+        if (
+          await User.exists({
+            'paymentHistory.transactionId':
+              request.transactionId
+          }).session(session)
+        ) {
+          bad(
+            409,
+            'UTR already verified.'
+          );
+        }
+
+        const now = new Date();
+
+        customer =
+          await User.findOneAndUpdate(
+            {
+              _id: existingCustomer._id,
+              schemeJoined: true,
+              isActive: {
+                $ne: false
+              },
+              paidMonths:
+                request.monthNum - 1
+            },
+            {
+              $inc: {
+                paidMonths: 1
+              },
+              $push: {
+                paymentHistory: {
+                  monthNum:
+                    request.monthNum,
+                  amount:
+                    request.amount,
+                  transactionId:
+                    request.transactionId,
+                  paidAt:
+                    request.createdAt,
+                  verifiedAt: now,
+                  method: 'UPI'
+                }
+              },
+              $set: {
+                isLaborFree: false
+              }
+            },
+            {
+              new: true,
+              session
+            }
+          );
+
+        if (!customer) {
+          bad(
+            409,
+            'Passbook changed. Refresh and retry.'
+          );
+        }
+
+        paymentRequest =
+          await PaymentRequest.findOneAndUpdate(
+            {
+              _id: id,
+              status: 'Pending'
+            },
+            {
+              $set: {
+                status: 'Approved',
+                reviewedAt: now,
+                reviewedBy:
+                  ADMIN_EMAIL
+              }
+            },
+            {
+              new: true,
+              session
+            }
+          );
+
+        if (!paymentRequest) {
+          bad(
+            409,
+            'Payment request already reviewed.'
+          );
+        }
       }
-    });
+    );
   } finally {
     await session.endSession();
   }
@@ -2139,12 +2524,18 @@ async function reviewPayment(req, res, action) {
   });
 }
 
-for (const method of ['post', 'put']) {
+for (
+  const method of ['post', 'put']
+) {
   app[method](
     '/api/admin/payment-requests/:id/approve',
     adminAuth,
     wrap((req, res) =>
-      reviewPayment(req, res, 'Approved')
+      reviewPayment(
+        req,
+        res,
+        'Approved'
+      )
     )
   );
 
@@ -2152,7 +2543,11 @@ for (const method of ['post', 'put']) {
     '/api/admin/payment-requests/:id/reject',
     adminAuth,
     wrap((req, res) =>
-      reviewPayment(req, res, 'Rejected')
+      reviewPayment(
+        req,
+        res,
+        'Rejected'
+      )
     )
   );
 }
@@ -2161,7 +2556,11 @@ app.post(
   '/api/admin/approve-payment',
   adminAuth,
   wrap((req, res) =>
-    reviewPayment(req, res, 'Approved')
+    reviewPayment(
+      req,
+      res,
+      'Approved'
+    )
   )
 );
 
@@ -2169,7 +2568,11 @@ app.post(
   '/api/admin/reject-payment',
   adminAuth,
   wrap((req, res) =>
-    reviewPayment(req, res, 'Rejected')
+    reviewPayment(
+      req,
+      res,
+      'Rejected'
+    )
   )
 );
 
@@ -2180,7 +2583,8 @@ app.post(
     reviewPayment(
       req,
       res,
-      clean(req.body.action).toLowerCase() === 'reject'
+      clean(req.body.action)
+        .toLowerCase() === 'reject'
         ? 'Rejected'
         : 'Approved'
     )
@@ -2198,47 +2602,62 @@ app.post(
     if (
       req.body.userId &&
       String(req.body.userId) !==
-        String(req.customer._id)
+      String(req.customer._id)
     ) {
-      bad(403, 'Not your scheme.');
+      bad(
+        403,
+        'Not your scheme.'
+      );
     }
 
-    const standardMakingCharges = Number(
-      req.body.standardMakingCharges || 0
-    );
+    const standardMakingCharges =
+      Number(
+        req.body.standardMakingCharges || 0
+      );
 
     if (
-      !Number.isFinite(standardMakingCharges) ||
+      !Number.isFinite(
+        standardMakingCharges
+      ) ||
       standardMakingCharges < 0
     ) {
-      bad(400, 'Invalid making charges.');
+      bad(
+        400,
+        'Invalid making charges.'
+      );
     }
 
-    const eligible = discountEligible(
-      req.customer
-    );
+    const eligible =
+      discountEligible(req.customer);
 
     const totalAccumulatedSavings =
       req.customer.paymentHistory.reduce(
         (sum, payment) =>
-          sum + Number(payment.amount || 0),
+          sum +
+          Number(
+            payment.amount || 0
+          ),
         0
       );
 
     res.json({
       success: true,
       message: eligible
-        ? 'Eligible subject to store verification and scheme terms.'
+        ? 'Eligible subject to scheme terms.'
         : 'Not yet eligible.',
       redemptionDetails: {
-        customerId: req.customer.customerId,
-        customerName: req.customer.name,
+        customerId:
+          req.customer.customerId,
+        customerName:
+          req.customer.name,
         totalAccumulatedSavings,
         standardMakingCharges,
         makingChargesDiscountPercentage:
           eligible ? 100 : 0,
         finalMakingChargesToPay:
-          eligible ? 0 : standardMakingCharges,
+          eligible
+            ? 0
+            : standardMakingCharges,
         eligible,
         goldOnly: true,
         previewOnly: true
@@ -2248,7 +2667,7 @@ app.post(
 );
 
 // ============================================================
-// STORE SETTINGS / UPI
+// STORE UPI SETTINGS
 // ============================================================
 
 app.get(
@@ -2259,7 +2678,8 @@ app.get(
         'store_config',
         {
           $setOnInsert: {
-            merchantName: 'Rahul Jewellers'
+            merchantName:
+              'Rahul Jewellers'
           }
         },
         {
@@ -2279,7 +2699,10 @@ app.put(
   '/api/store/settings',
   adminAuth,
   wrap(async (req, res) => {
-    const upiId = clean(req.body.upiId);
+    const upiId = clean(
+      req.body.upiId
+    );
+
     const merchantName = safe(
       req.body.merchantName,
       100
@@ -2288,7 +2711,9 @@ app.put(
     if (
       !upiId ||
       !merchantName ||
-      !/^[\w.\-]+@[\w.\-]+$/.test(upiId)
+      !/^[\w.\-]+@[\w.\-]+$/.test(
+        upiId
+      )
     ) {
       bad(
         400,
@@ -2296,7 +2721,8 @@ app.put(
       );
     }
 
-    const qrCodeUrl = req.body.qrCodeUrl;
+    const qrCodeUrl =
+      req.body.qrCodeUrl;
 
     if (
       qrCodeUrl !== undefined &&
@@ -2304,7 +2730,10 @@ app.put(
       !/^(data:image\/(?:png|jpeg|webp);base64,|https:\/\/)/i
         .test(qrCodeUrl)
     ) {
-      bad(400, 'Invalid QR image.');
+      bad(
+        400,
+        'Invalid QR image.'
+      );
     }
 
     const settings =
@@ -2335,16 +2764,19 @@ app.put(
 );
 
 // ============================================================
-// WHATSAPP REMINDERS
+// WHATSAPP REMINDER
 // ============================================================
 
 app.post(
   '/api/admin/send-whatsapp-reminder',
   adminAuth,
   wrap(async (req, res) => {
-    const customer = await User.findOne({
-      customerId: clean(req.body.customerId)
-    });
+    const customer =
+      await User.findOne({
+        customerId: clean(
+          req.body.customerId
+        )
+      });
 
     if (
       !customer ||
@@ -2352,12 +2784,14 @@ app.post(
     ) {
       bad(
         404,
-        'Gold Scheme subscriber not found.'
+        'Gold Scheme customer not found.'
       );
     }
 
     if (
-      Number(customer.paidMonths || 0) >= 12
+      Number(
+        customer.paidMonths || 0
+      ) >= 12
     ) {
       bad(
         409,
@@ -2366,15 +2800,18 @@ app.post(
     }
 
     const month =
-      Number(customer.paidMonths || 0) + 1;
+      Number(
+        customer.paidMonths || 0
+      ) + 1;
 
     const message =
       `नमस्ते ${customer.name} जी,\n\n` +
       `Rahul Jewellers Sheoganj Gold Savings Scheme रिमाइंडर।\n` +
       `Customer ID: ${customer.customerId}\n` +
       `किस्त: ${month}/12\n` +
-      `राशि: ₹${Number(customer.customInstallment)
-        .toLocaleString('en-IN')}\n\n` +
+      `राशि: ₹${Number(
+        customer.customInstallment
+      ).toLocaleString('en-IN')}\n\n` +
       `12 किस्तें पूरी करने के अगले महीने ` +
       `Gold Jewellery के Labour/Making Charges पर ` +
       `नियमानुसार 100% छूट।\nधन्यवाद!`;
@@ -2389,7 +2826,7 @@ app.post(
 );
 
 // ============================================================
-// MANUAL GOLD RATE
+// MANUAL 22K GOLD RATE
 // ============================================================
 
 const goldClients = new Set();
@@ -2398,27 +2835,42 @@ function goldPayload(rate) {
   return {
     success: true,
     type: 'gold',
-    enabled: Boolean(rate?.enabled),
-    carat: '22K',
-    priceInrPerGram: Number(
-      rate?.priceInrPerGram || 0
+    enabled: Boolean(
+      rate?.enabled
     ),
+    carat: '22K',
+    priceInrPerGram:
+      Number(
+        rate?.priceInrPerGram || 0
+      ),
     source: 'manual',
-    connected: Boolean(rate?.enabled),
-    timestamp: rate?.updatedAt
-      ? new Date(rate.updatedAt).getTime()
-      : Date.now(),
-    goldLastUpdated: rate?.updatedAt
-      ? new Date(rate.updatedAt).getTime()
-      : null
+    connected: Boolean(
+      rate?.enabled
+    ),
+    timestamp:
+      rate?.updatedAt
+        ? new Date(
+            rate.updatedAt
+          ).getTime()
+        : Date.now(),
+    goldLastUpdated:
+      rate?.updatedAt
+        ? new Date(
+            rate.updatedAt
+          ).getTime()
+        : null
   };
 }
 
 function broadcastGoldRate(rate) {
   const message =
-    `data: ${JSON.stringify(goldPayload(rate))}\n\n`;
+    `data: ${JSON.stringify(
+      goldPayload(rate)
+    )}\n\n`;
 
-  for (const client of goldClients) {
+  for (
+    const client of goldClients
+  ) {
     try {
       client.write(message);
     } catch {
@@ -2430,11 +2882,14 @@ function broadcastGoldRate(rate) {
 app.get(
   '/api/gold-rate',
   wrap(async (_req, res) => {
-    const rate = await GoldRate.findById(
-      'published_gold_rate'
-    ).lean();
+    const rate =
+      await GoldRate.findById(
+        'published_gold_rate'
+      ).lean();
 
-    res.json(goldPayload(rate));
+    res.json(
+      goldPayload(rate)
+    );
   })
 );
 
@@ -2443,7 +2898,8 @@ app.put(
   adminAuth,
   wrap(async (req, res) => {
     if (
-      typeof req.body.enabled !== 'boolean'
+      typeof req.body.enabled !==
+      'boolean'
     ) {
       bad(
         400,
@@ -2465,7 +2921,7 @@ app.put(
     ) {
       bad(
         400,
-        'Enter a valid rate in INR per gram.'
+        'Enter valid INR per gram.'
       );
     }
 
@@ -2474,10 +2930,13 @@ app.put(
         'published_gold_rate',
         {
           $set: {
-            enabled: req.body.enabled,
-            priceInrPerGram: price,
+            enabled:
+              req.body.enabled,
+            priceInrPerGram:
+              price,
             carat: '22K',
-            updatedBy: ADMIN_EMAIL
+            updatedBy:
+              ADMIN_EMAIL
           }
         },
         {
@@ -2504,40 +2963,50 @@ app.get(
       'Content-Type',
       'text/event-stream'
     );
+
     res.setHeader(
       'Cache-Control',
       'no-cache, no-transform'
     );
+
     res.setHeader(
       'Connection',
       'keep-alive'
     );
+
     res.setHeader(
       'X-Accel-Buffering',
       'no'
     );
 
     if (
-      typeof res.flushHeaders === 'function'
+      typeof res.flushHeaders ===
+      'function'
     ) {
       res.flushHeaders();
     }
 
     goldClients.add(res);
 
-    const rate = await GoldRate.findById(
-      'published_gold_rate'
-    ).lean();
+    const rate =
+      await GoldRate.findById(
+        'published_gold_rate'
+      ).lean();
 
     res.write(
-      `data: ${JSON.stringify(goldPayload(rate))}\n\n`
+      `data: ${JSON.stringify(
+        goldPayload(rate)
+      )}\n\n`
     );
 
-    const heartbeat = setInterval(() => {
-      try {
-        res.write(': heartbeat\n\n');
-      } catch {}
-    }, 15000);
+    const heartbeat =
+      setInterval(() => {
+        try {
+          res.write(
+            ': heartbeat\n\n'
+          );
+        } catch {}
+      }, 15000);
 
     req.on('close', () => {
       clearInterval(heartbeat);
@@ -2547,7 +3016,7 @@ app.get(
 );
 
 // ============================================================
-// AI CUSTOMER SUPPORT
+// AI SUPPORT CHAT
 // ============================================================
 
 app.post(
@@ -2559,13 +3028,16 @@ app.post(
     );
 
     if (!message) {
-      bad(400, 'Message required.');
+      bad(
+        400,
+        'Message required.'
+      );
     }
 
     if (!ai) {
       bad(
         503,
-        'Support chat is temporarily unavailable.'
+        'Support chat temporarily unavailable.'
       );
     }
 
@@ -2577,20 +3049,16 @@ app.post(
         contents: message,
         config: {
           systemInstruction:
-            `You are the Hindi-first assistant for ` +
-            `Rahul Jewellers Sheoganj, Rajasthan. ` +
-            `The showroom sells Gold and Silver jewellery. ` +
-            `The 12+1 savings scheme is GOLD ONLY. ` +
-            `Customers pay 12 monthly installments, ` +
-            `and in the following month eligible customers ` +
-            `get 100% off labour/making charges on gold ` +
-            `jewellery, subject to terms. ` +
-            `There is NO free 13th installment, free extra ` +
-            `gold, or silver savings scheme. ` +
-            `UPI installment submissions remain Pending ` +
-            `until admin verifies. ` +
-            `Never claim a manually entered gold rate ` +
-            `is a live market rate.`
+            'You are the Hindi-first assistant for ' +
+            'Rahul Jewellers Sheoganj, Rajasthan. ' +
+            'The showroom sells Gold and Silver jewellery. ' +
+            'The 12+1 savings scheme is GOLD ONLY. ' +
+            'Customers pay 12 monthly installments. ' +
+            'In the following month, eligible customers ' +
+            'get 100% off labour/making charges on ' +
+            'gold jewellery, subject to terms. ' +
+            'There is NO free 13th installment or extra gold. ' +
+            'UPI submissions remain Pending until admin verifies.'
         }
       });
 
@@ -2604,68 +3072,86 @@ app.post(
 );
 
 // ============================================================
-// DISABLE UNSAFE LEGACY SCHEME ENDPOINTS
+// DISABLE UNSAFE LEGACY SCHEME ROUTES
 // ============================================================
 
-app.use('/api/schemes', (_req, res) => {
-  res.status(410).json({
-    success: false,
-    message:
-      'Legacy scheme routes disabled. Use verified customer/admin payment APIs.'
-  });
-});
-
-// ============================================================
-// ERROR HANDLING
-// ============================================================
-
-app.use((err, _req, res, _next) => {
-  if (
-    err instanceof mongoose.Error.ValidationError
-  ) {
-    return res.status(400).json({
-      success: false,
-      message: err.message
-    });
-  }
-
-  if (err?.code === 11000) {
-    return res.status(409).json({
+app.use(
+  '/api/schemes',
+  (_req, res) => {
+    res.status(410).json({
       success: false,
       message:
-        'Duplicate mobile, Customer ID, UTR or pending installment.'
+        'Legacy scheme routes disabled. Use verified payment APIs.'
     });
   }
-
-  if (err?.status) {
-    return res.status(err.status).json({
-      success: false,
-      message: err.message
-    });
-  }
-
-  console.error('Backend error:', err);
-
-  res.status(500).json({
-    success: false,
-    message: 'Server error. Please try again.'
-  });
-});
+);
 
 // ============================================================
-// CONNECT MONGODB AND START SERVER
+// ERROR HANDLER
+// ============================================================
+
+app.use(
+  (error, _req, res, _next) => {
+    if (
+      error instanceof
+      mongoose.Error.ValidationError
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    if (
+      error?.code === 11000
+    ) {
+      return res.status(409).json({
+        success: false,
+        message:
+          'Duplicate mobile, Customer ID, UTR or pending installment.'
+      });
+    }
+
+    if (error?.status) {
+      return res.status(
+        error.status
+      ).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    console.error(
+      'Backend error:',
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message:
+        'Server error. Please try again.'
+    });
+  }
+);
+
+// ============================================================
+// DATABASE CONNECTION
 // ============================================================
 
 mongoose
   .connect(MONGO_URI)
   .then(async () => {
-    // Migrate old passbook accounts into schemeJoined.
-    // Newly registered independent accounts remain unjoined.
     await User.updateMany(
       {
-        schemeJoined: { $exists: false },
+        schemeJoined: {
+          $exists: false
+        },
         $or: [
-          { paidMonths: { $gt: 0 } },
+          {
+            paidMonths: {
+              $gt: 0
+            }
+          },
           {
             startDate: {
               $type: 'string',
@@ -2696,10 +3182,10 @@ mongoose
       }
     );
   })
-  .catch(err => {
+  .catch(error => {
     console.error(
       'MongoDB startup error:',
-      err
+      error
     );
 
     process.exitCode = 1;
