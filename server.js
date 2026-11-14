@@ -25,12 +25,10 @@ app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT || 5000);
 const MONGO_URI = process.env.MONGO_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
-
 const ADMIN_EMAIL = (
   process.env.ADMIN_EMAIL ||
   'web.rahuljewellers051@gmail.com'
 ).trim().toLowerCase();
-
 const RESEND_FROM =
   process.env.RESEND_FROM || 'onboarding@resend.dev';
 
@@ -39,7 +37,9 @@ if (!MONGO_URI) {
 }
 
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
-  throw new Error('JWT_SECRET must be at least 32 characters.');
+  throw new Error(
+    'Set a strong JWT_SECRET of at least 32 characters.'
+  );
 }
 
 const resend = process.env.RESEND_API_KEY
@@ -54,24 +54,21 @@ const ai = process.env.GEMINI_API_KEY
 
 const scrypt = promisify(scryptCallback);
 
-// Supports both new and existing Render URL variables.
 const allowedOrigins = new Set(
   [
     process.env.CORS_ORIGINS,
     process.env.CLIENT_ORIGIN,
-    process.env.ADMIN_ORIGIN,
-    process.env.ADMIN_URL,
-    process.env.CUSTOMER_URL
+    process.env.ADMIN_ORIGIN
   ]
     .filter(Boolean)
-    .flatMap(value => value.split(','))
-    .map(value => value.trim().replace(/\/$/, ''))
+    .flatMap(x => x.split(','))
+    .map(x => x.trim().replace(/\/$/, ''))
     .filter(Boolean)
 );
 
 app.use(
   cors({
-    origin(origin, callback) {
+    origin(origin, cb) {
       if (
         !origin ||
         allowedOrigins.has(origin) ||
@@ -80,11 +77,13 @@ app.use(
           /^http:\/\/localhost(?::\d+)?$/.test(origin)
         )
       ) {
-        return callback(null, true);
+        return cb(null, true);
       }
 
-      return callback(
-        new Error('Origin not allowed; configure CORS_ORIGINS.')
+      return cb(
+        new Error(
+          'Origin not allowed; configure CORS_ORIGINS.'
+        )
       );
     },
     credentials: true,
@@ -105,14 +104,12 @@ app.use(
 );
 
 app.use(express.json({ limit: '15mb' }));
-
 app.use(
   express.urlencoded({
     extended: true,
     limit: '15mb'
   })
 );
-
 app.use(cookieParser());
 
 const loginLimiter = rateLimit({
@@ -122,7 +119,8 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     success: false,
-    message: 'Too many attempts. Please try again later.'
+    message:
+      'Too many attempts. Please try again later.'
   }
 });
 
@@ -153,12 +151,12 @@ const validPhone = value =>
   /^[6-9]\d{9}$/.test(value);
 
 const validAmount = value =>
-  Number.isInteger(value) &&
+  Number.isFinite(value) &&
   value >= 1000 &&
   value <= 1000000;
 
-const escapeRegex = value =>
-  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const escapeRegex = s =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function istParts(date, fields) {
   return Object.fromEntries(
@@ -167,49 +165,52 @@ function istParts(date, fields) {
       ...fields
     })
       .formatToParts(date)
-      .filter(part => part.type !== 'literal')
-      .map(part => [part.type, part.value])
+      .filter(p => p.type !== 'literal')
+      .map(p => [p.type, p.value])
   );
 }
 
 function istDate(date = new Date()) {
-  const parts = istParts(date, {
+  const p = istParts(date, {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'
   });
 
-  return `${parts.year}-${parts.month}-${parts.day}`;
+  return `${p.year}-${p.month}-${p.day}`;
 }
 
 function istMonth(date = new Date()) {
-  const parts = istParts(date, {
+  const p = istParts(date, {
     year: 'numeric',
     month: '2-digit'
   });
 
-  return Number(parts.year) * 12 + Number(parts.month);
+  return Number(p.year) * 12 + Number(p.month);
 }
 
-function validDate(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+function validDate(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     return false;
   }
 
-  const date = new Date(`${value}T00:00:00.000Z`);
+  const d = new Date(
+    `${s}T00:00:00.000Z`
+  );
 
   return (
-    !Number.isNaN(date.getTime()) &&
-    date.toISOString().slice(0, 10) === value &&
-    value <= istDate()
+    !Number.isNaN(d.getTime()) &&
+    d.toISOString().slice(0, 10) === s &&
+    s <= istDate()
   );
 }
 
 async function hashPassword(password) {
   const salt = randomBytes(16).toString('hex');
-  const hash = await scrypt(password, salt, 64);
 
-  return `scrypt$${salt}$${hash.toString('hex')}`;
+  return `scrypt$${salt}$${(
+    await scrypt(password, salt, 64)
+  ).toString('hex')}`;
 }
 
 async function verifyPassword(password, stored) {
@@ -233,13 +234,12 @@ async function verifyPassword(password, stored) {
     );
   }
 
-  // Upgrade legacy passwords after successful login.
-  const first = Buffer.from(password);
-  const second = Buffer.from(stored);
+  const a = Buffer.from(password);
+  const b = Buffer.from(stored);
 
   return (
-    first.length === second.length &&
-    timingSafeEqual(first, second)
+    a.length === b.length &&
+    timingSafeEqual(a, b)
   );
 }
 
@@ -274,36 +274,37 @@ const StoreSettings =
     )
   );
 
-const paymentHistorySchema = new mongoose.Schema(
-  {
-    monthNum: {
-      type: Number,
-      required: true,
-      min: 1,
-      max: 12
+const paymentHistorySchema =
+  new mongoose.Schema(
+    {
+      monthNum: {
+        type: Number,
+        required: true,
+        min: 1,
+        max: 12
+      },
+      amount: {
+        type: Number,
+        required: true
+      },
+      transactionId: {
+        type: String,
+        required: true
+      },
+      paidAt: {
+        type: Date,
+        default: Date.now
+      },
+      verifiedAt: {
+        type: Date
+      },
+      method: {
+        type: String,
+        default: 'Manual'
+      }
     },
-    amount: {
-      type: Number,
-      required: true
-    },
-    transactionId: {
-      type: String,
-      required: true
-    },
-    paidAt: {
-      type: Date,
-      default: Date.now
-    },
-    verifiedAt: {
-      type: Date
-    },
-    method: {
-      type: String,
-      default: 'Manual'
-    }
-  },
-  { _id: false }
-);
+    { _id: false }
+  );
 
 const userSchema = new mongoose.Schema(
   {
@@ -334,14 +335,6 @@ const userSchema = new mongoose.Schema(
       required: true,
       select: false
     },
-
-    // Incremented when Admin resets password.
-    // Old customer login tokens become invalid.
-    tokenVersion: {
-      type: Number,
-      default: 0
-    },
-
     address: {
       type: String,
       default: ''
@@ -469,52 +462,75 @@ const Product =
     )
   );
 
-const paymentRequestSchema = new mongoose.Schema(
-  {
-    customer: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-      index: true
+const paymentRequestSchema =
+  new mongoose.Schema(
+    {
+      customer: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true,
+        index: true
+      },
+      customerId: {
+        type: String,
+        required: true
+      },
+      monthNum: {
+        type: Number,
+        required: true,
+        min: 1,
+        max: 12
+      },
+      amount: {
+        type: Number,
+        required: true
+      },
+      transactionId: {
+        type: String,
+        required: true,
+        unique: true
+      },
+      status: {
+        type: String,
+        enum: [
+          'Pending',
+          'Approved',
+          'Rejected'
+        ],
+        default: 'Pending',
+        index: true
+      },
+      reviewedAt: Date,
+      reviewedBy: String,
+      rejectionReason: {
+        type: String,
+        default: ''
+      },
+      passbookApplied: {
+        type: Boolean,
+        default: false
+      },
+      passbookAdjustments: {
+        type: [
+          {
+            action: {
+              type: String,
+              enum: ['PAY', 'UNPAY'],
+              required: true
+            },
+            at: {
+              type: Date,
+              default: Date.now
+            },
+            by: String,
+            reason: String
+          }
+        ],
+        default: []
+      }
     },
-    customerId: {
-      type: String,
-      required: true
-    },
-    monthNum: {
-      type: Number,
-      required: true,
-      min: 1,
-      max: 12
-    },
-    amount: {
-      type: Number,
-      required: true
-    },
-    transactionId: {
-      type: String,
-      required: true,
-      unique: true
-    },
-    status: {
-      type: String,
-      enum: [
-        'Pending',
-        'Approved',
-        'Rejected'
-      ],
-      default: 'Pending',
-      index: true
-    },
-    reviewedAt: Date,
-    reviewedBy: String,
-    rejectionReason: {
-      type: String,
-      default: ''
-    }
-  },
-  { timestamps: true }
-);
+    { timestamps: true }
+  );
 
 paymentRequestSchema.index(
   {
@@ -534,6 +550,43 @@ const PaymentRequest =
   mongoose.model(
     'PaymentRequest',
     paymentRequestSchema
+  );
+
+// Financial audit record
+
+const AdminAudit =
+  mongoose.models.AdminAudit ||
+  mongoose.model(
+    'AdminAudit',
+    new mongoose.Schema(
+      {
+        action: {
+          type: String,
+          required: true,
+          index: true
+        },
+        customerRef: {
+          type: mongoose.Schema.Types.ObjectId,
+          index: true
+        },
+        customerId: {
+          type: String,
+          required: true,
+          index: true
+        },
+        monthNum: Number,
+        reason: {
+          type: String,
+          required: true
+        },
+        actor: {
+          type: String,
+          default: ADMIN_EMAIL
+        },
+        details: mongoose.Schema.Types.Mixed
+      },
+      { timestamps: true }
+    )
   );
 
 const GoldRate =
@@ -568,27 +621,25 @@ const GoldRate =
   );
 
 // ============================================================
-// AUTH HELPERS
+// CUSTOMER HELPERS
 // ============================================================
 
-function discountEligible(customer) {
+function discountEligible(c) {
   if (
-    !customer ||
-    !customer.schemeJoined ||
-    Number(customer.paidMonths || 0) < 12
+    !c ||
+    !c.schemeJoined ||
+    Number(c.paidMonths || 0) < 12
   ) {
     return false;
   }
 
-  const finalPayment = (
-    customer.paymentHistory || []
-  ).find(
-    payment => Number(payment.monthNum) === 12
+  const final = (c.paymentHistory || []).find(
+    p => Number(p.monthNum) === 12
   );
 
   const date =
-    finalPayment?.verifiedAt ||
-    finalPayment?.paidAt;
+    final?.verifiedAt ||
+    final?.paidAt;
 
   return Boolean(
     date &&
@@ -597,56 +648,57 @@ function discountEligible(customer) {
   );
 }
 
-function publicCustomer(customer) {
-  if (!customer) {
+function publicCustomer(c) {
+  if (!c) {
     return null;
   }
 
-  const object =
-    typeof customer.toObject === 'function'
-      ? customer.toObject()
-      : { ...customer };
+  const obj =
+    typeof c.toObject === 'function'
+      ? c.toObject()
+      : { ...c };
 
-  delete object.password;
-  delete object.__v;
+  delete obj.password;
+  delete obj.__v;
 
-  object.eligibleForMakingChargeDiscount =
-    discountEligible(object);
+  obj.eligibleForMakingChargeDiscount =
+    discountEligible(obj);
 
-  object.isLaborFree =
-    object.eligibleForMakingChargeDiscount;
+  obj.isLaborFree =
+    obj.eligibleForMakingChargeDiscount;
 
-  return object;
+  return obj;
 }
 
-function customerToken(customer) {
+function customerToken(c) {
   return jwt.sign(
     {
-      sub: String(customer._id),
+      sub: String(c._id),
       role: 'customer',
-      type: 'customer',
-      v: Number(customer.tokenVersion || 0)
+      type: 'customer'
     },
     JWT_SECRET,
-    { expiresIn: '7d' }
+    {
+      expiresIn: '7d'
+    }
   );
 }
 
 function readToken(req, cookieName) {
-  const authorization =
-    req.headers.authorization;
+  const auth = req.headers.authorization;
 
-  return (
-    typeof authorization === 'string' &&
-    authorization.startsWith('Bearer ')
-  )
-    ? authorization.slice(7).trim()
+  return typeof auth === 'string' &&
+    auth.startsWith('Bearer ')
+    ? auth.slice(7).trim()
     : req.cookies?.[cookieName];
 }
 
 function adminAuth(req, res, next) {
   try {
-    const token = readToken(req, 'admin_token');
+    const token = readToken(
+      req,
+      'admin_token'
+    );
 
     if (!token) {
       return res.status(401).json({
@@ -655,19 +707,19 @@ function adminAuth(req, res, next) {
       });
     }
 
-    const payload = jwt.verify(
+    const p = jwt.verify(
       token,
       JWT_SECRET
     );
 
     if (
       !(
-        payload.type === 'admin' ||
-        payload.role === 'admin' ||
+        p.type === 'admin' ||
+        p.role === 'admin' ||
         (
-          !payload.type &&
-          !payload.role &&
-          clean(payload.email).toLowerCase() ===
+          !p.type &&
+          !p.role &&
+          clean(p.email).toLowerCase() ===
             ADMIN_EMAIL
         )
       )
@@ -695,51 +747,58 @@ const customerAuth = wrap(
     );
 
     if (!token) {
-      bad(401, 'Customer login required.');
+      bad(
+        401,
+        'Customer login required.'
+      );
     }
 
-    let payload;
+    let p;
 
     try {
-      payload = jwt.verify(
+      p = jwt.verify(
         token,
         JWT_SECRET
       );
     } catch {
-      bad(401, 'Customer session expired.');
-    }
-
-    if (
-      payload.type !== 'customer' &&
-      payload.role !== 'customer'
-    ) {
-      bad(403, 'Customer access only.');
-    }
-
-    if (!validId(payload.sub)) {
-      bad(401, 'Invalid customer token.');
-    }
-
-    const customer = await User.findById(
-      payload.sub
-    );
-
-    if (!customer) {
-      bad(401, 'Customer account not found.');
-    }
-
-    if (
-      Number(payload.v || 0) !==
-      Number(customer.tokenVersion || 0)
-    ) {
       bad(
         401,
-        'Password changed. Please log in again.'
+        'Customer session expired.'
+      );
+    }
+
+    if (
+      p.type !== 'customer' &&
+      p.role !== 'customer'
+    ) {
+      bad(
+        403,
+        'Customer access only.'
+      );
+    }
+
+    if (!validId(p.sub)) {
+      bad(
+        401,
+        'Invalid customer token.'
+      );
+    }
+
+    const customer =
+      await User.findById(p.sub);
+
+    if (!customer) {
+      bad(
+        401,
+        'Customer account not found.'
       );
     }
 
     if (customer.isActive === false) {
-      bad(403, 'Account deactivated.');
+      bad(
+        403,
+        'Account deactivated.'
+      );
     }
 
     req.customer = customer;
@@ -747,25 +806,25 @@ const customerAuth = wrap(
   }
 );
 
-// ============================================================
-// HEALTH
-// ============================================================
+app.get(
+  '/',
+  (_req, res) =>
+    res.send(
+      'Rahul Jewellers Sheoganj Backend is Running'
+    )
+);
 
-app.get('/', (_req, res) => {
-  res.send(
-    'Rahul Jewellers Sheoganj Backend is Running'
-  );
-});
-
-app.get('/health', (_req, res) => {
-  res.json({
-    success: true,
-    database:
-      mongoose.connection.readyState === 1
-        ? 'connected'
-        : 'disconnected'
-  });
-});
+app.get(
+  '/health',
+  (_req, res) =>
+    res.json({
+      success: true,
+      database:
+        mongoose.connection.readyState === 1
+          ? 'connected'
+          : 'disconnected'
+    })
+);
 
 // ============================================================
 // ADMIN EMAIL OTP
@@ -782,7 +841,10 @@ app.post(
     ).toLowerCase();
 
     if (email !== ADMIN_EMAIL) {
-      bad(403, 'Unauthorized admin email.');
+      bad(
+        403,
+        'Unauthorized admin email.'
+      );
     }
 
     if (!resend) {
@@ -793,19 +855,23 @@ app.post(
     }
 
     const otp = String(
-      randomInt(100000, 1000000)
+      randomInt(
+        100000,
+        1000000
+      )
     );
 
-    const result = await resend.emails.send({
-      from: RESEND_FROM,
-      to: [ADMIN_EMAIL],
-      subject:
-        'Rahul Jewellers Admin Login OTP',
-      html:
-        `<p>Your admin verification code: ` +
-        `<strong>${otp}</strong> ` +
-        `(valid for 5 minutes).</p>`
-    });
+    const result =
+      await resend.emails.send({
+        from: RESEND_FROM,
+        to: [ADMIN_EMAIL],
+        subject:
+          'Rahul Jewellers Admin Login OTP',
+        html:
+          `<p>Your admin verification code: ` +
+          `<strong>${otp}</strong> ` +
+          `(valid for 5 minutes).</p>`
+      });
 
     if (result.error) {
       bad(
@@ -818,7 +884,8 @@ app.post(
       hash: createHash('sha256')
         .update(otp)
         .digest('hex'),
-      expires: Date.now() + 300000,
+      expires:
+        Date.now() + 300000,
       attempts: 0
     });
 
@@ -837,8 +904,12 @@ app.post(
       req.body.email
     ).toLowerCase();
 
-    const otp = clean(req.body.otp);
-    const record = otpStorage.get(email);
+    const otp = clean(
+      req.body.otp
+    );
+
+    const record =
+      otpStorage.get(email);
 
     if (
       email !== ADMIN_EMAIL ||
@@ -846,7 +917,10 @@ app.post(
       record.expires < Date.now() ||
       record.attempts >= 5
     ) {
-      bad(401, 'OTP expired or invalid.');
+      bad(
+        401,
+        'OTP expired or invalid.'
+      );
     }
 
     record.attempts++;
@@ -857,10 +931,16 @@ app.post(
         createHash('sha256')
           .update(otp)
           .digest(),
-        Buffer.from(record.hash, 'hex')
+        Buffer.from(
+          record.hash,
+          'hex'
+        )
       )
     ) {
-      bad(401, 'Incorrect OTP.');
+      bad(
+        401,
+        'Incorrect OTP.'
+      );
     }
 
     otpStorage.delete(email);
@@ -873,7 +953,9 @@ app.post(
         email
       },
       JWT_SECRET,
-      { expiresIn: '7d' }
+      {
+        expiresIn: '7d'
+      }
     );
 
     res.json({
@@ -887,41 +969,46 @@ app.post(
 app.get(
   '/api/client/admin-session',
   adminAuth,
-  (_req, res) => {
+  (_req, res) =>
     res.json({
       success: true,
       message: 'Session active.'
-    });
-  }
+    })
 );
 
 app.post(
   '/api/client/admin-logout',
   (_req, res) => {
-    res.clearCookie('admin_token', {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none'
-    });
+    res.clearCookie(
+      'admin_token',
+      {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none'
+      }
+    );
 
-    res.json({ success: true });
+    res.json({
+      success: true
+    });
   }
 );
 
 // ============================================================
-// PRODUCTS AND CATEGORIES
+// PRODUCTS
 // ============================================================
 
 app.get(
   '/api/products',
   wrap(async (_req, res) => {
-    const products = await Product.find()
-      .sort({ createdAt: -1 })
-      .lean();
-
     res.json({
       success: true,
-      products
+      products:
+        await Product.find()
+          .sort({
+            createdAt: -1
+          })
+          .lean()
     });
   })
 );
@@ -955,7 +1042,11 @@ app.post(
         ? 0
         : Number(req.body.price);
 
-    if (!title || !category || !weight) {
+    if (
+      !title ||
+      !category ||
+      !weight
+    ) {
       bad(
         400,
         'Product name, category and weight are required.'
@@ -966,30 +1057,37 @@ app.post(
       !Number.isFinite(price) ||
       price < 0
     ) {
-      bad(400, 'Invalid price.');
+      bad(
+        400,
+        'Invalid price.'
+      );
     }
 
     if (
-      !/^(data:image\/(?:png|jpeg|webp|gif);base64,|https:\/\/)/i
-        .test(imageUrl)
+      !/^(data:image\/(?:png|jpeg|webp|gif);base64,|https:\/\/)/i.test(
+        imageUrl
+      )
     ) {
-      bad(400, 'Valid image is required.');
+      bad(
+        400,
+        'Valid image is required.'
+      );
     }
 
-    const categoryId = validId(
-      req.body.categoryId
-    )
-      ? req.body.categoryId
-      : null;
+    const categoryId =
+      validId(req.body.categoryId)
+        ? req.body.categoryId
+        : null;
 
-    const product = await Product.create({
-      title,
-      category,
-      weight,
-      imageUrl,
-      price,
-      categoryId
-    });
+    const product =
+      await Product.create({
+        title,
+        category,
+        weight,
+        imageUrl,
+        price,
+        categoryId
+      });
 
     res.status(201).json({
       success: true,
@@ -1003,16 +1101,21 @@ app.delete(
   adminAuth,
   wrap(async (req, res) => {
     if (!validId(req.params.id)) {
-      bad(400, 'Invalid product ID.');
+      bad(
+        400,
+        'Invalid product ID.'
+      );
     }
 
-    const deleted =
-      await Product.findByIdAndDelete(
+    if (
+      !await Product.findByIdAndDelete(
         req.params.id
+      )
+    ) {
+      bad(
+        404,
+        'Product not found.'
       );
-
-    if (!deleted) {
-      bad(404, 'Product not found.');
     }
 
     res.json({
@@ -1025,14 +1128,17 @@ app.delete(
 app.get(
   '/api/categories',
   wrap(async (_req, res) => {
-    const categories = await Category.find()
-      .populate('parentCategory')
-      .sort({ createdAt: -1 })
-      .lean();
-
     res.json({
       success: true,
-      categories
+      categories:
+        await Category.find()
+          .populate(
+            'parentCategory'
+          )
+          .sort({
+            createdAt: -1
+          })
+          .lean()
     });
   })
 );
@@ -1053,11 +1159,12 @@ app.post(
       );
     }
 
-    const parentCategory = validId(
-      req.body.parentCategory
-    )
-      ? req.body.parentCategory
-      : null;
+    const parentCategory =
+      validId(
+        req.body.parentCategory
+      )
+        ? req.body.parentCategory
+        : null;
 
     if (
       parentCategory &&
@@ -1071,14 +1178,15 @@ app.post(
       );
     }
 
-    const category = await Category.create({
-      name,
-      description: safe(
-        req.body.description,
-        400
-      ),
-      parentCategory
-    });
+    const category =
+      await Category.create({
+        name,
+        description: safe(
+          req.body.description,
+          400
+        ),
+        parentCategory
+      });
 
     res.status(201).json({
       success: true,
@@ -1092,7 +1200,10 @@ app.delete(
   adminAuth,
   wrap(async (req, res) => {
     if (!validId(req.params.id)) {
-      bad(400, 'Invalid category ID.');
+      bad(
+        400,
+        'Invalid category ID.'
+      );
     }
 
     if (
@@ -1108,7 +1219,8 @@ app.delete(
 
     if (
       await Category.exists({
-        parentCategory: req.params.id
+        parentCategory:
+          req.params.id
       })
     ) {
       bad(
@@ -1117,13 +1229,15 @@ app.delete(
       );
     }
 
-    const deleted =
-      await Category.findByIdAndDelete(
+    if (
+      !await Category.findByIdAndDelete(
         req.params.id
+      )
+    ) {
+      bad(
+        404,
+        'Category not found.'
       );
-
-    if (!deleted) {
-      bad(404, 'Category not found.');
     }
 
     res.json({
@@ -1134,7 +1248,7 @@ app.delete(
 );
 
 // ============================================================
-// CUSTOMER REGISTRATION AND LOGIN
+// CUSTOMER REGISTRATION / LOGIN
 // ============================================================
 
 async function createCustomer({
@@ -1149,20 +1263,26 @@ async function createCustomer({
 }) {
   return User.create({
     customerId:
-      `RJ${randomInt(100000000, 1000000000)}`,
+      `RJ${randomInt(
+        100000000,
+        1000000000
+      )}`,
     name,
     dob,
     phone,
     address,
-    password: await hashPassword(password),
+    password:
+      await hashPassword(password),
     schemeJoined,
-    schemeJoinedAt: schemeJoined
-      ? new Date()
-      : undefined,
+    schemeJoinedAt:
+      schemeJoined
+        ? new Date()
+        : undefined,
     customInstallment,
-    startDate: schemeJoined
-      ? (startDate || istDate())
-      : '',
+    startDate:
+      schemeJoined
+        ? startDate || istDate()
+        : '',
     paidMonths: 0,
     isLaborFree: false,
     isActive: true
@@ -1178,8 +1298,13 @@ app.post(
       100
     );
 
-    const dob = clean(req.body.dob);
-    const phone = clean(req.body.phone);
+    const dob = clean(
+      req.body.dob
+    );
+
+    const phone = clean(
+      req.body.phone
+    );
 
     const address = safe(
       req.body.address,
@@ -1197,7 +1322,7 @@ app.post(
     ) {
       bad(
         400,
-        'Valid name, date of birth and Indian mobile are required.'
+        'Valid name, date of birth (YYYY-MM-DD) and Indian mobile are required.'
       );
     }
 
@@ -1221,25 +1346,32 @@ app.post(
       );
     }
 
-    if (await User.exists({ phone })) {
+    if (
+      await User.exists({
+        phone
+      })
+    ) {
       bad(
         409,
         'Mobile number already registered.'
       );
     }
 
-    const customer = await createCustomer({
-      name,
-      dob,
-      phone,
-      address,
-      password
-    });
+    const customer =
+      await createCustomer({
+        name,
+        dob,
+        phone,
+        address,
+        password
+      });
 
     res.status(201).json({
       success: true,
-      customer: publicCustomer(customer),
-      token: customerToken(customer)
+      customer:
+        publicCustomer(customer),
+      token:
+        customerToken(customer)
     });
   })
 );
@@ -1256,25 +1388,33 @@ app.post(
       req.body.password ?? ''
     );
 
-    if (!identifier || !password) {
+    if (
+      !identifier ||
+      !password
+    ) {
       bad(
         400,
         'Customer ID/mobile and password required.'
       );
     }
 
-    const customer = await User.findOne({
-      $or: [
-        {
-          customerId: {
-            $regex:
-              `^${escapeRegex(identifier)}$`,
-            $options: 'i'
+    const customer =
+      await User.findOne({
+        $or: [
+          {
+            customerId: {
+              $regex:
+                `^${escapeRegex(
+                  identifier
+                )}$`,
+              $options: 'i'
+            }
+          },
+          {
+            phone: identifier
           }
-        },
-        { phone: identifier }
-      ]
-    }).select('+password');
+        ]
+      }).select('+password');
 
     if (
       !customer ||
@@ -1289,15 +1429,19 @@ app.post(
       );
     }
 
-    if (customer.isActive === false) {
+    if (
+      customer.isActive === false
+    ) {
       bad(
         403,
-        'Account deactivated.'
+        'Account deactivated. Contact Rahul Jewellers Sheoganj.'
       );
     }
 
     if (
-      !customer.password.startsWith('scrypt$')
+      !customer.password.startsWith(
+        'scrypt$'
+      )
     ) {
       customer.password =
         await hashPassword(password);
@@ -1307,8 +1451,10 @@ app.post(
 
     res.json({
       success: true,
-      customer: publicCustomer(customer),
-      token: customerToken(customer)
+      customer:
+        publicCustomer(customer),
+      token:
+        customerToken(customer)
     });
   })
 );
@@ -1318,8 +1464,9 @@ app.get(
   customerAuth,
   wrap(async (req, res) => {
     if (
-      String(req.customer._id) !==
-      req.params.id
+      String(
+        req.customer._id
+      ) !== req.params.id
     ) {
       bad(
         403,
@@ -1329,13 +1476,19 @@ app.get(
 
     res.json({
       success: true,
-      customer: publicCustomer(req.customer)
+      customer:
+        publicCustomer(
+          req.customer
+        )
     });
   })
 );
 
-async function updateCustomerProfile(req, res) {
-  const customer = req.customer;
+async function updateCustomerProfile(
+  req,
+  res
+) {
+  const c = req.customer;
 
   const id =
     req.params.id ||
@@ -1343,7 +1496,7 @@ async function updateCustomerProfile(req, res) {
 
   if (
     id &&
-    String(id) !== String(customer._id)
+    String(id) !== String(c._id)
   ) {
     bad(
       403,
@@ -1351,7 +1504,9 @@ async function updateCustomerProfile(req, res) {
     );
   }
 
-  if (req.body.name !== undefined) {
+  if (
+    req.body.name !== undefined
+  ) {
     const name = safe(
       req.body.name,
       100
@@ -1364,30 +1519,40 @@ async function updateCustomerProfile(req, res) {
       );
     }
 
-    customer.name = name;
+    c.name = name;
   }
 
-  if (req.body.address !== undefined) {
-    customer.address = safe(
+  if (
+    req.body.address !== undefined
+  ) {
+    c.address = safe(
       req.body.address,
       500
     );
   }
 
-  if (req.body.dob !== undefined) {
-    if (!validDate(clean(req.body.dob))) {
+  if (
+    req.body.dob !== undefined
+  ) {
+    if (
+      !validDate(
+        clean(req.body.dob)
+      )
+    ) {
       bad(
         400,
         'Invalid date of birth.'
       );
     }
 
-    customer.dob = clean(req.body.dob);
+    c.dob = clean(
+      req.body.dob
+    );
   }
 
   if (
     req.body.phone !== undefined &&
-    clean(req.body.phone) !== customer.phone
+    clean(req.body.phone) !== c.phone
   ) {
     const phone = clean(
       req.body.phone
@@ -1404,7 +1569,7 @@ async function updateCustomerProfile(req, res) {
       await User.exists({
         phone,
         _id: {
-          $ne: customer._id
+          $ne: c._id
         }
       })
     ) {
@@ -1414,7 +1579,7 @@ async function updateCustomerProfile(req, res) {
       );
     }
 
-    customer.phone = phone;
+    c.phone = phone;
   }
 
   if (req.body.password) {
@@ -1439,13 +1604,14 @@ async function updateCustomerProfile(req, res) {
     if (!currentPassword) {
       bad(
         400,
-        'Current password required.'
+        'Current password required to change password.'
       );
     }
 
-    const existing = await User.findById(
-      customer._id
-    ).select('+password');
+    const existing =
+      await User.findById(
+        c._id
+      ).select('+password');
 
     if (
       !existing ||
@@ -1460,18 +1626,21 @@ async function updateCustomerProfile(req, res) {
       );
     }
 
-    customer.password =
-      await hashPassword(newPassword);
+    c.password =
+      await hashPassword(
+        newPassword
+      );
   }
 
-  await customer.save();
+  await c.save();
 
-  const result = publicCustomer(customer);
+  const customer =
+    publicCustomer(c);
 
   res.json({
     success: true,
-    customer: result,
-    user: result
+    customer,
+    user: customer
   });
 }
 
@@ -1493,10 +1662,16 @@ app.post(
   wrap(async (req, res) => {
     if (
       req.body.userId &&
-      String(req.body.userId) !==
-        String(req.customer._id)
+      String(
+        req.body.userId
+      ) !== String(
+        req.customer._id
+      )
     ) {
-      bad(403, 'Access denied.');
+      bad(
+        403,
+        'Access denied.'
+      );
     }
 
     const productId =
@@ -1508,12 +1683,16 @@ app.post(
         _id: productId
       })
     ) {
-      bad(404, 'Product not found.');
+      bad(
+        404,
+        'Product not found.'
+      );
     }
 
     if (
       req.customer.wishlist.some(
-        id => String(id) ===
+        id =>
+          String(id) ===
           String(productId)
       )
     ) {
@@ -1528,9 +1707,10 @@ app.post(
 
     await req.customer.save();
 
-    const customer = publicCustomer(
-      req.customer
-    );
+    const customer =
+      publicCustomer(
+        req.customer
+      );
 
     res.json({
       success: true,
@@ -1541,7 +1721,7 @@ app.post(
 );
 
 // ============================================================
-// GOLD-ONLY 12+1 SCHEME
+// GOLD 12+1 SCHEME
 // ============================================================
 
 app.post(
@@ -1560,7 +1740,9 @@ app.post(
       );
     }
 
-    if (req.customer.schemeJoined) {
+    if (
+      req.customer.schemeJoined
+    ) {
       bad(
         409,
         'Already joined the Gold Scheme.'
@@ -1571,19 +1753,27 @@ app.post(
       await User.findOneAndUpdate(
         {
           _id: req.customer._id,
-          schemeJoined: { $ne: true },
+          schemeJoined: {
+            $ne: true
+          },
           paidMonths: 0
         },
         {
           $set: {
             schemeJoined: true,
-            schemeJoinedAt: new Date(),
-            customInstallment: amount,
-            startDate: istDate(),
-            isLaborFree: false
+            schemeJoinedAt:
+              new Date(),
+            customInstallment:
+              amount,
+            startDate:
+              istDate(),
+            isLaborFree:
+              false
           }
         },
-        { new: true }
+        {
+          new: true
+        }
       );
 
     if (!updated) {
@@ -1595,31 +1785,36 @@ app.post(
 
     res.json({
       success: true,
-      customer: publicCustomer(updated),
-      message: 'Gold Scheme joined.'
+      customer:
+        publicCustomer(updated),
+      message:
+        'Gold Scheme joined.'
     });
   })
 );
 
-// ============================================================
-// CUSTOMER PAYMENT SUBMISSION
-// ============================================================
+// Customer UTR submission stays pending
+// until admin verification.
 
 app.post(
   '/api/customer/pay-installment',
   customerAuth,
   wrap(async (req, res) => {
-    const customer = req.customer;
+    const c = req.customer;
 
     if (
       req.body.userId &&
-      String(req.body.userId) !==
-        String(customer._id)
+      String(
+        req.body.userId
+      ) !== String(c._id)
     ) {
-      bad(403, 'Not your scheme.');
+      bad(
+        403,
+        'Not your scheme.'
+      );
     }
 
-    if (!customer.schemeJoined) {
+    if (!c.schemeJoined) {
       bad(
         409,
         'Join Gold Scheme first.'
@@ -1644,26 +1839,32 @@ app.post(
       monthNum < 1 ||
       monthNum > 12
     ) {
-      bad(400, 'Invalid month.');
-    }
-
-    if (
-      monthNum !==
-      Number(customer.paidMonths || 0) + 1
-    ) {
       bad(
-        409,
-        'Only next unpaid installment can be submitted.'
+        400,
+        'Invalid month.'
       );
     }
 
     if (
-      amount !==
-      Number(customer.customInstallment)
+      monthNum !==
+      Number(
+        c.paidMonths || 0
+      ) + 1
+    ) {
+      bad(
+        409,
+        'Only the next unpaid installment can be submitted.'
+      );
+    }
+
+    if (
+      amount !== Number(
+        c.customInstallment
+      )
     ) {
       bad(
         400,
-        'Amount must match monthly installment.'
+        'Amount must match your monthly installment.'
       );
     }
 
@@ -1674,7 +1875,7 @@ app.post(
     ) {
       bad(
         400,
-        'Invalid UTR. Use 10–20 letters/digits.'
+        'UTR must contain 10–20 letters/digits.'
       );
     }
 
@@ -1692,22 +1893,60 @@ app.post(
 
     if (
       await PaymentRequest.exists({
-        customer: customer._id,
+        transactionId
+      })
+    ) {
+      bad(
+        409,
+        'This UTR has already been submitted.'
+      );
+    }
+
+    if (
+      await AdminAudit.exists({
+        action:
+          'CUSTOMER_DELETE',
+        'details.paymentRequests.transactionId':
+          transactionId
+      })
+    ) {
+      bad(
+        409,
+        'This UTR belongs to an archived financial record. Contact the showroom.'
+      );
+    }
+
+    if (
+      await PaymentRequest.exists({
+        customer: c._id,
         monthNum,
         status: 'Pending'
       })
     ) {
       bad(
         409,
-        'Payment already pending review.'
+        'A payment for this month is already pending review.'
+      );
+    }
+
+    if (
+      await PaymentRequest.exists({
+        customer: c._id,
+        monthNum,
+        status: 'Approved'
+      })
+    ) {
+      bad(
+        409,
+        'A UPI payment for this month is already approved. Contact the admin to reapply it to the passbook; do not pay again.'
       );
     }
 
     const paymentRequest =
       await PaymentRequest.create({
-        customer: customer._id,
+        customer: c._id,
         customerId:
-          customer.customerId,
+          c.customerId,
         monthNum,
         amount,
         transactionId
@@ -1718,10 +1957,11 @@ app.post(
       verified: false,
       status: 'Pending',
       message:
-        'Payment submitted for admin verification.',
+        'Submitted for admin verification. Your paid months have NOT increased yet.',
       paymentRequest,
       request: paymentRequest,
-      customer: publicCustomer(customer)
+      customer:
+        publicCustomer(c)
     });
   })
 );
@@ -1732,15 +1972,19 @@ app.get(
   wrap(async (req, res) => {
     const requests =
       await PaymentRequest.find({
-        customer: req.customer._id
+        customer:
+          req.customer._id
       })
-        .sort({ createdAt: -1 })
+        .sort({
+          createdAt: -1
+        })
         .lean();
 
     res.json({
       success: true,
       requests,
-      paymentRequests: requests
+      paymentRequests:
+        requests
     });
   })
 );
@@ -1756,7 +2000,9 @@ app.get(
     const customers = (
       await User.find()
         .select('-password')
-        .sort({ createdAt: -1 })
+        .sort({
+          createdAt: -1
+        })
         .lean()
     ).map(publicCustomer);
 
@@ -1767,72 +2013,6 @@ app.get(
     });
   })
 );
-
-// ============================================================
-// ADMIN RESET CUSTOMER PASSWORD
-// ============================================================
-
-app.post(
-  '/api/admin/customers/:id/reset-password',
-  adminAuth,
-  loginLimiter,
-  wrap(async (req, res) => {
-    if (!validId(req.params.id)) {
-      bad(
-        400,
-        'Invalid customer ID.'
-      );
-    }
-
-    const customer =
-      await User.findById(
-        req.params.id
-      ).select('+password');
-
-    if (!customer) {
-      bad(
-        404,
-        'Customer not found.'
-      );
-    }
-
-    // Create a new password.
-    // Never return the old password.
-    const temporaryPassword =
-      randomBytes(18)
-        .toString('base64url');
-
-    customer.password =
-      await hashPassword(
-        temporaryPassword
-      );
-
-    customer.tokenVersion =
-      Number(
-        customer.tokenVersion || 0
-      ) + 1;
-
-    await customer.save();
-
-    res.setHeader(
-      'Cache-Control',
-      'no-store'
-    );
-
-    res.json({
-      success: true,
-      message:
-        'Password reset successfully.',
-      customerId:
-        customer.customerId,
-      temporaryPassword
-    });
-  })
-);
-
-// ============================================================
-// ADMIN CREATE CUSTOMER
-// ============================================================
 
 app.post(
   '/api/admin/create-customer',
@@ -1866,7 +2046,7 @@ app.post(
     ) {
       bad(
         400,
-        'Valid name and mobile required.'
+        'Valid name and Indian mobile required.'
       );
     }
 
@@ -1891,7 +2071,9 @@ app.post(
     }
 
     if (
-      await User.exists({ phone })
+      await User.exists({
+        phone
+      })
     ) {
       bad(
         409,
@@ -1904,11 +2086,14 @@ app.post(
       (
         req.body.schemeJoined !== false &&
         req.body.customInstallment != null &&
-        Boolean(req.body.startDate)
+        Boolean(
+          req.body.startDate
+        )
       );
 
     const amount = Number(
-      req.body.customInstallment ?? 10000
+      req.body.customInstallment ??
+      10000
     );
 
     const startDate = clean(
@@ -1946,14 +2131,16 @@ app.post(
         schemeJoined: join,
         customInstallment:
           join ? amount : 10000,
-        startDate: join
-          ? startDate || istDate()
-          : ''
+        startDate:
+          join
+            ? startDate || istDate()
+            : ''
       });
 
     res.status(201).json({
       success: true,
-      customer: publicCustomer(customer)
+      customer:
+        publicCustomer(customer)
     });
   })
 );
@@ -1969,7 +2156,7 @@ app.put(
     ) {
       bad(
         400,
-        'Valid ID and isActive required.'
+        'Valid ID and isActive boolean required.'
       );
     }
 
@@ -1980,7 +2167,9 @@ app.put(
           isActive:
             req.body.isActive
         },
-        { new: true }
+        {
+          new: true
+        }
       );
 
     if (!customer) {
@@ -1992,61 +2181,201 @@ app.put(
 
     res.json({
       success: true,
-      customer: publicCustomer(customer)
+      customer:
+        publicCustomer(customer)
     });
   })
 );
+
+// ============================================================
+// DELETE CUSTOMER INCLUDING PAID CUSTOMERS
+// ============================================================
+
+// Requires:
+// confirmDelete: true
+// confirmCustomerId: exact Customer ID
+// reason: minimum 5 characters
 
 app.delete(
   '/api/admin/delete-customer/:id',
   adminAuth,
   wrap(async (req, res) => {
-    if (!validId(req.params.id)) {
+    if (
+      !validId(req.params.id)
+    ) {
       bad(
         400,
         'Invalid customer ID.'
       );
     }
 
-    const customer =
-      await User.findById(
-        req.params.id
-      );
+    const confirmation = clean(
+      req.body?.confirmCustomerId
+    );
 
-    if (!customer) {
-      bad(
-        404,
-        'Customer not found.'
-      );
-    }
+    const reason = safe(
+      req.body?.reason,
+      300
+    );
 
     if (
-      Number(
-        customer.paidMonths || 0
-      ) > 0 ||
-      await PaymentRequest.exists({
-        customer: customer._id
-      })
+      req.body?.confirmDelete !== true ||
+      !confirmation ||
+      reason.length < 5
     ) {
       bad(
-        409,
-        'Financial records exist. Deactivate instead.'
+        400,
+        'Confirm the exact Customer ID and enter a deletion reason (at least 5 characters).'
       );
     }
 
-    await User.deleteOne({
-      _id: customer._id
-    });
+    const session =
+      await mongoose.startSession();
+
+    let deletedCustomerId = '';
+    let removedRequests = 0;
+
+    try {
+      await session.withTransaction(
+        async () => {
+          const customer =
+            await User.findById(
+              req.params.id
+            ).session(session);
+
+          if (!customer) {
+            bad(
+              404,
+              'Customer not found. Refresh the directory.'
+            );
+          }
+
+          if (
+            confirmation !==
+            customer.customerId
+          ) {
+            bad(
+              400,
+              'Customer ID confirmation does not match. Nothing was deleted.'
+            );
+          }
+
+          const requests =
+            await PaymentRequest.find({
+              customer:
+                customer._id
+            })
+              .session(session)
+              .lean();
+
+          deletedCustomerId =
+            customer.customerId;
+
+          const financialSnapshot = {
+            schemeJoined:
+              customer.schemeJoined,
+            customInstallment:
+              customer.customInstallment,
+            paidMonths:
+              customer.paidMonths,
+            paymentHistory:
+              customer.paymentHistory.map(
+                p => ({
+                  monthNum:
+                    p.monthNum,
+                  amount:
+                    p.amount,
+                  transactionId:
+                    p.transactionId,
+                  paidAt:
+                    p.paidAt,
+                  verifiedAt:
+                    p.verifiedAt,
+                  method:
+                    p.method
+                })
+              ),
+            paymentRequests:
+              requests.map(p => ({
+                monthNum:
+                  p.monthNum,
+                amount:
+                  p.amount,
+                transactionId:
+                  p.transactionId,
+                status:
+                  p.status,
+                passbookApplied:
+                  p.passbookApplied,
+                reviewedAt:
+                  p.reviewedAt,
+                passbookAdjustments:
+                  p.passbookAdjustments
+              }))
+          };
+
+          await AdminAudit.create(
+            [
+              {
+                action:
+                  'CUSTOMER_DELETE',
+                customerRef:
+                  customer._id,
+                customerId:
+                  customer.customerId,
+                reason,
+                details:
+                  financialSnapshot
+              }
+            ],
+            { session }
+          );
+
+          const requestsResult =
+            await PaymentRequest.deleteMany(
+              {
+                customer:
+                  customer._id
+              }
+            ).session(session);
+
+          removedRequests =
+            requestsResult.deletedCount ||
+            0;
+
+          const customerResult =
+            await User.deleteOne({
+              _id:
+                customer._id
+            }).session(session);
+
+          if (
+            customerResult.deletedCount !==
+            1
+          ) {
+            bad(
+              409,
+              'Customer changed during deletion. Retry.'
+            );
+          }
+        }
+      );
+    } finally {
+      await session.endSession();
+    }
 
     res.json({
       success: true,
-      message: 'Customer deleted.'
+      deletedCustomerId,
+      removedRequests,
+      message:
+        'Customer and linked payment requests deleted. Financial audit retained; no bank refund was made.'
     });
   })
 );
 
 // ============================================================
-// ADMIN MANUAL PASSBOOK
+// ADMIN PAID / UNPAID AFTER UPI VERIFICATION
 // ============================================================
 
 app.post(
@@ -2064,12 +2393,25 @@ app.post(
       req.body.action
     ).toUpperCase();
 
+    const reason = safe(
+      req.body.reason ||
+      (
+        action === 'PAY'
+          ? 'Admin passbook entry'
+          : ''
+      ),
+      300
+    );
+
     if (
       !validId(userId) ||
       !Number.isInteger(monthNum) ||
       monthNum < 1 ||
       monthNum > 12 ||
-      !['PAY', 'UNPAY'].includes(action)
+      ![
+        'PAY',
+        'UNPAY'
+      ].includes(action)
     ) {
       bad(
         400,
@@ -2077,170 +2419,446 @@ app.post(
       );
     }
 
-    const customer =
-      await User.findById(userId);
-
-    if (!customer) {
-      bad(
-        404,
-        'Customer not found.'
-      );
-    }
-
-    if (!customer.schemeJoined) {
-      bad(
-        409,
-        'Customer has not joined Gold Scheme.'
-      );
-    }
-
     if (
-      customer.isActive === false
+      reason.length < 5
     ) {
       bad(
-        403,
-        'Customer deactivated.'
+        400,
+        'Enter a reason (at least 5 characters) for this adjustment.'
       );
     }
 
-    if (action === 'PAY') {
-      if (
-        monthNum !==
-        Number(
-          customer.paidMonths || 0
-        ) + 1
-      ) {
-        bad(
-          409,
-          'Only next unpaid month can be marked paid.'
-        );
-      }
+    const session =
+      await mongoose.startSession();
 
-      if (
-        await PaymentRequest.exists({
-          customer: customer._id,
-          monthNum,
-          status: 'Pending'
-        })
-      ) {
-        bad(
-          409,
-          'UPI request pending. Review it first.'
-        );
-      }
+    let updated;
+    let source = 'Manual';
 
-      const now = new Date();
+    try {
+      await session.withTransaction(
+        async () => {
+          const c =
+            await User.findById(
+              userId
+            ).session(session);
 
-      const updated =
-        await User.findOneAndUpdate(
-          {
-            _id: customer._id,
-            paidMonths:
-              monthNum - 1,
-            schemeJoined: true
-          },
-          {
-            $inc: {
-              paidMonths: 1
-            },
-            $push: {
-              paymentHistory: {
-                monthNum,
-                amount:
-                  customer.customInstallment,
-                transactionId:
-                  `ADMIN_MANUAL_${Date.now()}_${randomInt(1000, 9999)}`,
-                paidAt: now,
-                verifiedAt: now,
-                method:
-                  'AdminManual'
-              }
-            },
-            $set: {
-              isLaborFree: false
-            }
-          },
-          { new: true }
-        );
-
-      if (!updated) {
-        bad(
-          409,
-          'Passbook changed. Refresh and retry.'
-        );
-      }
-
-      return res.json({
-        success: true,
-        customer:
-          publicCustomer(updated)
-      });
-    }
-
-    if (
-      monthNum !==
-      Number(
-        customer.paidMonths || 0
-      )
-    ) {
-      bad(
-        409,
-        'Only latest paid month can be reversed.'
-      );
-    }
-
-    if (
-      await PaymentRequest.exists({
-        customer: customer._id,
-        monthNum,
-        status: 'Approved'
-      })
-    ) {
-      bad(
-        409,
-        'Approved UPI payment cannot be reversed here.'
-      );
-    }
-
-    const updated =
-      await User.findOneAndUpdate(
-        {
-          _id: customer._id,
-          paidMonths: monthNum
-        },
-        {
-          $inc: {
-            paidMonths: -1
-          },
-          $pull: {
-            paymentHistory: {
-              monthNum
-            }
-          },
-          $set: {
-            isLaborFree: false
+          if (!c) {
+            bad(
+              404,
+              'Customer not found.'
+            );
           }
-        },
-        { new: true }
-      );
 
-    if (!updated) {
-      bad(
-        409,
-        'Passbook changed. Refresh and retry.'
+          if (!c.schemeJoined) {
+            bad(
+              409,
+              'Customer has not joined Gold Scheme.'
+            );
+          }
+
+          if (
+            c.isActive === false
+          ) {
+            bad(
+              403,
+              'Customer is deactivated. Activate before editing the passbook.'
+            );
+          }
+
+          const paidMonths = Number(
+            c.paidMonths || 0
+          );
+
+          const now = new Date();
+
+          let transactionId = '';
+          let request = null;
+          let amount = Number(
+            c.customInstallment
+          );
+
+          if (action === 'PAY') {
+            if (
+              monthNum !==
+              paidMonths + 1
+            ) {
+              bad(
+                409,
+                'Only the next unpaid month can be marked paid.'
+              );
+            }
+
+            if (
+              await PaymentRequest.exists({
+                customer:
+                  c._id,
+                monthNum,
+                status: 'Pending'
+              }).session(session)
+            ) {
+              bad(
+                409,
+                'UPI request pending. Approve or reject it first.'
+              );
+            }
+
+            request =
+              await PaymentRequest.findOne({
+                customer:
+                  c._id,
+                monthNum,
+                status:
+                  'Approved'
+              })
+                .sort({
+                  reviewedAt: -1
+                })
+                .session(session);
+
+            if (request) {
+              if (
+                request.passbookApplied !==
+                false
+              ) {
+                bad(
+                  409,
+                  'UPI was already approved/applied. Refresh or contact support before changing it.'
+                );
+              }
+
+              source =
+                'UPI_REAPPLIED';
+
+              transactionId =
+                request.transactionId;
+
+              amount =
+                request.amount;
+
+              if (
+                amount !== Number(
+                  c.customInstallment
+                )
+              ) {
+                bad(
+                  409,
+                  'Verified UPI amount differs from current monthly installment.'
+                );
+              }
+            } else {
+              source =
+                'ADMIN_MANUAL';
+
+              transactionId =
+                `ADMIN_MANUAL_${Date.now()}_${randomInt(
+                  1000,
+                  9999
+                )}`;
+            }
+
+            updated =
+              await User.findOneAndUpdate(
+                {
+                  _id:
+                    c._id,
+                  paidMonths,
+                  schemeJoined:
+                    true,
+                  isActive: {
+                    $ne: false
+                  },
+                  'paymentHistory.monthNum': {
+                    $ne:
+                      monthNum
+                  }
+                },
+                {
+                  $inc: {
+                    paidMonths: 1
+                  },
+                  $push: {
+                    paymentHistory: {
+                      monthNum,
+                      amount,
+                      transactionId,
+                      paidAt:
+                        request?.createdAt ||
+                        now,
+                      verifiedAt:
+                        request?.reviewedAt ||
+                        now,
+                      method:
+                        request
+                          ? 'UPI'
+                          : 'AdminManual'
+                    }
+                  },
+                  $set: {
+                    isLaborFree:
+                      false
+                  }
+                },
+                {
+                  new: true,
+                  session
+                }
+              );
+
+            if (!updated) {
+              bad(
+                409,
+                'Passbook changed. Refresh and retry.'
+              );
+            }
+
+            if (request) {
+              const r =
+                await PaymentRequest.updateOne(
+                  {
+                    _id:
+                      request._id,
+                    status:
+                      'Approved',
+                    passbookApplied:
+                      false
+                  },
+                  {
+                    $set: {
+                      passbookApplied:
+                        true
+                    },
+                    $push: {
+                      passbookAdjustments: {
+                        action:
+                          'PAY',
+                        at: now,
+                        by:
+                          ADMIN_EMAIL,
+                        reason
+                      }
+                    }
+                  },
+                  { session }
+                );
+
+              if (
+                r.modifiedCount !== 1
+              ) {
+                bad(
+                  409,
+                  'UPI status changed. Refresh and retry.'
+                );
+              }
+            }
+          } else {
+            if (
+              monthNum !==
+              paidMonths
+            ) {
+              bad(
+                409,
+                'Only the latest paid month can be marked unpaid.'
+              );
+            }
+
+            const history =
+              c.paymentHistory.find(
+                p =>
+                  Number(
+                    p.monthNum
+                  ) === monthNum
+              );
+
+            if (!history) {
+              bad(
+                409,
+                'Payment history is missing for this paid month.'
+              );
+            }
+
+            transactionId =
+              history.transactionId;
+
+            amount =
+              history.amount;
+
+            if (
+              history.method ===
+              'UPI'
+            ) {
+              request =
+                await PaymentRequest.findOne({
+                  customer:
+                    c._id,
+                  monthNum,
+                  status:
+                    'Approved',
+                  transactionId
+                }).session(session);
+
+              if (!request) {
+                bad(
+                  409,
+                  'Approved UPI record is missing. Cannot safely adjust this month.'
+                );
+              }
+
+              source =
+                'UPI_ADJUSTED';
+            } else {
+              source =
+                'ADMIN_MANUAL';
+            }
+
+            updated =
+              await User.findOneAndUpdate(
+                {
+                  _id:
+                    c._id,
+                  paidMonths,
+                  'paymentHistory.transactionId':
+                    transactionId
+                },
+                {
+                  $inc: {
+                    paidMonths: -1
+                  },
+                  $pull: {
+                    paymentHistory: {
+                      monthNum
+                    }
+                  },
+                  $set: {
+                    isLaborFree:
+                      false
+                  }
+                },
+                {
+                  new: true,
+                  session
+                }
+              );
+
+            if (!updated) {
+              bad(
+                409,
+                'Passbook changed. Refresh and retry.'
+              );
+            }
+
+            if (request) {
+              const r =
+                await PaymentRequest.updateOne(
+                  {
+                    _id:
+                      request._id,
+                    status:
+                      'Approved',
+                    passbookApplied: {
+                      $ne: false
+                    }
+                  },
+                  {
+                    $set: {
+                      passbookApplied:
+                        false
+                    },
+                    $push: {
+                      passbookAdjustments: {
+                        action:
+                          'UNPAY',
+                        at: now,
+                        by:
+                          ADMIN_EMAIL,
+                        reason
+                      }
+                    }
+                  },
+                  { session }
+                );
+
+              if (
+                r.modifiedCount !== 1
+              ) {
+                bad(
+                  409,
+                  'UPI status changed. Refresh and retry.'
+                );
+              }
+            }
+          }
+
+          await AdminAudit.create(
+            [
+              {
+                action:
+                  `PASSBOOK_${action}`,
+                customerRef:
+                  c._id,
+                customerId:
+                  c.customerId,
+                monthNum,
+                reason,
+                details: {
+                  source,
+                  amount,
+                  transactionId,
+                  oldPaidMonths:
+                    paidMonths,
+                  newPaidMonths:
+                    updated.paidMonths,
+                  paymentRequestId:
+                    request?._id ||
+                    null
+                }
+              }
+            ],
+            { session }
+          );
+        }
       );
+    } finally {
+      await session.endSession();
     }
 
     res.json({
       success: true,
       customer:
-        publicCustomer(updated)
+        publicCustomer(updated),
+      source,
+      message:
+        action === 'UNPAY'
+          ? 'Installment removed from passbook. Approved UPI remains verified; no bank refund was made.'
+          : source ===
+            'UPI_REAPPLIED'
+            ? 'Previously verified UPI payment reapplied to passbook. No new payment was charged.'
+            : 'Installment marked paid manually.'
+    });
+  })
+);
+
+app.get(
+  '/api/admin/audit-log',
+  adminAuth,
+  wrap(async (req, res) => {
+    const events =
+      await AdminAudit.find()
+        .select('-details')
+        .sort({
+          createdAt: -1
+        })
+        .limit(100)
+        .lean();
+
+    res.json({
+      success: true,
+      events
     });
   })
 );
 
 // ============================================================
-// ADMIN PAYMENT REQUESTS
+// ADMIN UPI PAYMENT VERIFICATION
 // ============================================================
 
 app.get(
@@ -2261,25 +2879,30 @@ app.get(
     ) {
       bad(
         400,
-        'Invalid payment status.'
+        'Invalid status.'
       );
     }
 
     const requests =
       await PaymentRequest.find(
-        status ? { status } : {}
+        status
+          ? { status }
+          : {}
       )
         .populate(
           'customer',
           'customerId name phone paidMonths customInstallment isActive schemeJoined'
         )
-        .sort({ createdAt: -1 })
+        .sort({
+          createdAt: -1
+        })
         .lean();
 
     res.json({
       success: true,
       requests,
-      paymentRequests: requests
+      paymentRequests:
+        requests
     });
   })
 );
@@ -2296,13 +2919,16 @@ app.get(
           'customer',
           'customerId name phone paidMonths customInstallment'
         )
-        .sort({ createdAt: -1 })
+        .sort({
+          createdAt: -1
+        })
         .lean();
 
     res.json({
       success: true,
       requests,
-      paymentRequests: requests
+      paymentRequests:
+        requests
     });
   })
 );
@@ -2325,28 +2951,35 @@ async function reviewPayment(
     );
   }
 
-  if (action === 'Rejected') {
+  if (
+    action === 'Rejected'
+  ) {
     const paymentRequest =
       await PaymentRequest.findOneAndUpdate(
         {
           _id: id,
-          status: 'Pending'
+          status:
+            'Pending'
         },
         {
           $set: {
-            status: 'Rejected',
-            rejectionReason: safe(
-              req.body.reason ??
-              req.body.rejectionReason,
-              300
-            ),
+            status:
+              'Rejected',
+            rejectionReason:
+              safe(
+                req.body.reason ??
+                req.body.rejectionReason,
+                300
+              ),
             reviewedAt:
               new Date(),
             reviewedBy:
               ADMIN_EMAIL
           }
         },
-        { new: true }
+        {
+          new: true
+        }
       );
 
     if (!paymentRequest) {
@@ -2375,7 +3008,8 @@ async function reviewPayment(
         const request =
           await PaymentRequest.findOne({
             _id: id,
-            status: 'Pending'
+            status:
+              'Pending'
           }).session(session);
 
         if (!request) {
@@ -2385,15 +3019,15 @@ async function reviewPayment(
           );
         }
 
-        const existingCustomer =
+        const c =
           await User.findById(
             request.customer
           ).session(session);
 
         if (
-          !existingCustomer ||
-          existingCustomer.isActive === false ||
-          !existingCustomer.schemeJoined
+          !c ||
+          c.isActive === false ||
+          !c.schemeJoined
         ) {
           bad(
             409,
@@ -2403,8 +3037,9 @@ async function reviewPayment(
 
         if (
           Number(
-            existingCustomer.paidMonths || 0
-          ) + 1 !== request.monthNum
+            c.paidMonths || 0
+          ) + 1 !==
+          request.monthNum
         ) {
           bad(
             409,
@@ -2414,12 +3049,28 @@ async function reviewPayment(
 
         if (
           Number(
-            existingCustomer.customInstallment
+            c.customInstallment
           ) !== request.amount
         ) {
           bad(
             409,
             'Installment amount mismatch.'
+          );
+        }
+
+        if (
+          await PaymentRequest.exists({
+            customer:
+              c._id,
+            monthNum:
+              request.monthNum,
+            status:
+              'Approved'
+          }).session(session)
+        ) {
+          bad(
+            409,
+            'This month already has a verified UPI payment. Reapply it in the admin passbook instead of approving another.'
           );
         }
 
@@ -2435,13 +3086,29 @@ async function reviewPayment(
           );
         }
 
+        if (
+          await AdminAudit.exists({
+            action:
+              'CUSTOMER_DELETE',
+            'details.paymentRequests.transactionId':
+              request.transactionId
+          }).session(session)
+        ) {
+          bad(
+            409,
+            'UTR belongs to a deleted customer audit record.'
+          );
+        }
+
         const now = new Date();
 
         customer =
           await User.findOneAndUpdate(
             {
-              _id: existingCustomer._id,
-              schemeJoined: true,
+              _id:
+                c._id,
+              schemeJoined:
+                true,
               isActive: {
                 $ne: false
               },
@@ -2462,12 +3129,15 @@ async function reviewPayment(
                     request.transactionId,
                   paidAt:
                     request.createdAt,
-                  verifiedAt: now,
-                  method: 'UPI'
+                  verifiedAt:
+                    now,
+                  method:
+                    'UPI'
                 }
               },
               $set: {
-                isLaborFree: false
+                isLaborFree:
+                  false
               }
             },
             {
@@ -2487,12 +3157,17 @@ async function reviewPayment(
           await PaymentRequest.findOneAndUpdate(
             {
               _id: id,
-              status: 'Pending'
+              status:
+                'Pending'
             },
             {
               $set: {
-                status: 'Approved',
-                reviewedAt: now,
+                status:
+                  'Approved',
+                passbookApplied:
+                  true,
+                reviewedAt:
+                  now,
                 reviewedBy:
                   ADMIN_EMAIL
               }
@@ -2520,34 +3195,40 @@ async function reviewPayment(
     verified: true,
     status: 'Approved',
     paymentRequest,
-    customer: publicCustomer(customer)
+    customer:
+      publicCustomer(customer)
   });
 }
 
 for (
-  const method of ['post', 'put']
+  const method of [
+    'post',
+    'put'
+  ]
 ) {
   app[method](
     '/api/admin/payment-requests/:id/approve',
     adminAuth,
-    wrap((req, res) =>
-      reviewPayment(
-        req,
-        res,
-        'Approved'
-      )
+    wrap(
+      (req, res) =>
+        reviewPayment(
+          req,
+          res,
+          'Approved'
+        )
     )
   );
 
   app[method](
     '/api/admin/payment-requests/:id/reject',
     adminAuth,
-    wrap((req, res) =>
-      reviewPayment(
-        req,
-        res,
-        'Rejected'
-      )
+    wrap(
+      (req, res) =>
+        reviewPayment(
+          req,
+          res,
+          'Rejected'
+        )
     )
   );
 }
@@ -2555,44 +3236,49 @@ for (
 app.post(
   '/api/admin/approve-payment',
   adminAuth,
-  wrap((req, res) =>
-    reviewPayment(
-      req,
-      res,
-      'Approved'
-    )
+  wrap(
+    (req, res) =>
+      reviewPayment(
+        req,
+        res,
+        'Approved'
+      )
   )
 );
 
 app.post(
   '/api/admin/reject-payment',
   adminAuth,
-  wrap((req, res) =>
-    reviewPayment(
-      req,
-      res,
-      'Rejected'
-    )
+  wrap(
+    (req, res) =>
+      reviewPayment(
+        req,
+        res,
+        'Rejected'
+      )
   )
 );
 
 app.post(
   '/api/admin/verify-payment',
   adminAuth,
-  wrap((req, res) =>
-    reviewPayment(
-      req,
-      res,
-      clean(req.body.action)
-        .toLowerCase() === 'reject'
-        ? 'Rejected'
-        : 'Approved'
-    )
+  wrap(
+    (req, res) =>
+      reviewPayment(
+        req,
+        res,
+        clean(
+          req.body.action
+        ).toLowerCase() ===
+          'reject'
+          ? 'Rejected'
+          : 'Approved'
+      )
   )
 );
 
 // ============================================================
-// GOLD SCHEME REDEMPTION PREVIEW
+// SCHEME REDEMPTION PREVIEW
 // ============================================================
 
 app.post(
@@ -2601,8 +3287,11 @@ app.post(
   wrap(async (req, res) => {
     if (
       req.body.userId &&
-      String(req.body.userId) !==
-      String(req.customer._id)
+      String(
+        req.body.userId
+      ) !== String(
+        req.customer._id
+      )
     ) {
       bad(
         403,
@@ -2612,7 +3301,8 @@ app.post(
 
     const standardMakingCharges =
       Number(
-        req.body.standardMakingCharges || 0
+        req.body.standardMakingCharges ||
+        0
       );
 
     if (
@@ -2628,23 +3318,26 @@ app.post(
     }
 
     const eligible =
-      discountEligible(req.customer);
+      discountEligible(
+        req.customer
+      );
 
     const totalAccumulatedSavings =
       req.customer.paymentHistory.reduce(
-        (sum, payment) =>
+        (sum, p) =>
           sum +
           Number(
-            payment.amount || 0
+            p.amount || 0
           ),
         0
       );
 
     res.json({
       success: true,
-      message: eligible
-        ? 'Eligible subject to scheme terms.'
-        : 'Not yet eligible.',
+      message:
+        eligible
+          ? 'Eligible subject to store verification and scheme terms.'
+          : 'Not yet eligible.',
       redemptionDetails: {
         customerId:
           req.customer.customerId,
@@ -2667,7 +3360,7 @@ app.post(
 );
 
 // ============================================================
-// STORE UPI SETTINGS
+// STORE SETTINGS
 // ============================================================
 
 app.get(
@@ -2727,8 +3420,9 @@ app.put(
     if (
       qrCodeUrl !== undefined &&
       qrCodeUrl &&
-      !/^(data:image\/(?:png|jpeg|webp);base64,|https:\/\/)/i
-        .test(qrCodeUrl)
+      !/^(data:image\/(?:png|jpeg|webp);base64,|https:\/\/)/i.test(
+        qrCodeUrl
+      )
     ) {
       bad(
         400,
@@ -2764,14 +3458,14 @@ app.put(
 );
 
 // ============================================================
-// WHATSAPP REMINDER
+// WHATSAPP PAYMENT REMINDER
 // ============================================================
 
 app.post(
   '/api/admin/send-whatsapp-reminder',
   adminAuth,
   wrap(async (req, res) => {
-    const customer =
+    const c =
       await User.findOne({
         customerId: clean(
           req.body.customerId
@@ -2779,18 +3473,18 @@ app.post(
       });
 
     if (
-      !customer ||
-      !customer.schemeJoined
+      !c ||
+      !c.schemeJoined
     ) {
       bad(
         404,
-        'Gold Scheme customer not found.'
+        'Gold Scheme subscriber not found.'
       );
     }
 
     if (
       Number(
-        customer.paidMonths || 0
+        c.paidMonths || 0
       ) >= 12
     ) {
       bad(
@@ -2801,32 +3495,32 @@ app.post(
 
     const month =
       Number(
-        customer.paidMonths || 0
+        c.paidMonths || 0
       ) + 1;
 
     const message =
-      `नमस्ते ${customer.name} जी,\n\n` +
+      `नमस्ते ${c.name} जी,\n\n` +
       `Rahul Jewellers Sheoganj Gold Savings Scheme रिमाइंडर।\n` +
-      `Customer ID: ${customer.customerId}\n` +
+      `Customer ID: ${c.customerId}\n` +
       `किस्त: ${month}/12\n` +
       `राशि: ₹${Number(
-        customer.customInstallment
+        c.customInstallment
       ).toLocaleString('en-IN')}\n\n` +
-      `12 किस्तें पूरी करने के अगले महीने ` +
-      `Gold Jewellery के Labour/Making Charges पर ` +
-      `नियमानुसार 100% छूट।\nधन्यवाद!`;
+      `12 किस्तें पूरी करने के अगले महीने Gold Jewellery के Labour/Making Charges पर नियमानुसार 100% छूट।\n` +
+      `धन्यवाद!`;
 
     res.json({
       success: true,
       url:
-        `https://wa.me/91${customer.phone}` +
-        `?text=${encodeURIComponent(message)}`
+        `https://wa.me/91${c.phone}?text=${encodeURIComponent(
+          message
+        )}`
     });
   })
 );
 
 // ============================================================
-// MANUAL 22K GOLD RATE
+// GOLD RATE ON / OFF
 // ============================================================
 
 const goldClients = new Set();
@@ -2835,18 +3529,21 @@ function goldPayload(rate) {
   return {
     success: true,
     type: 'gold',
-    enabled: Boolean(
-      rate?.enabled
-    ),
+    enabled:
+      Boolean(
+        rate?.enabled
+      ),
     carat: '22K',
     priceInrPerGram:
       Number(
-        rate?.priceInrPerGram || 0
+        rate?.priceInrPerGram ||
+        0
       ),
     source: 'manual',
-    connected: Boolean(
-      rate?.enabled
-    ),
+    connected:
+      Boolean(
+        rate?.enabled
+      ),
     timestamp:
       rate?.updatedAt
         ? new Date(
@@ -2874,7 +3571,9 @@ function broadcastGoldRate(rate) {
     try {
       client.write(message);
     } catch {
-      goldClients.delete(client);
+      goldClients.delete(
+        client
+      );
     }
   }
 }
@@ -2882,13 +3581,12 @@ function broadcastGoldRate(rate) {
 app.get(
   '/api/gold-rate',
   wrap(async (_req, res) => {
-    const rate =
-      await GoldRate.findById(
-        'published_gold_rate'
-      ).lean();
-
     res.json(
-      goldPayload(rate)
+      goldPayload(
+        await GoldRate.findById(
+          'published_gold_rate'
+        ).lean()
+      )
     );
   })
 );
@@ -2921,7 +3619,7 @@ app.put(
     ) {
       bad(
         400,
-        'Enter valid INR per gram.'
+        'Enter a valid rate in INR per gram.'
       );
     }
 
@@ -2946,7 +3644,9 @@ app.put(
         }
       );
 
-    broadcastGoldRate(goldRate);
+    broadcastGoldRate(
+      goldRate
+    );
 
     res.json({
       success: true,
@@ -3008,10 +3708,17 @@ app.get(
         } catch {}
       }, 15000);
 
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      goldClients.delete(res);
-    });
+    req.on(
+      'close',
+      () => {
+        clearInterval(
+          heartbeat
+        );
+        goldClients.delete(
+          res
+        );
+      }
+    );
   })
 );
 
@@ -3037,7 +3744,7 @@ app.post(
     if (!ai) {
       bad(
         503,
-        'Support chat temporarily unavailable.'
+        'Support chat is temporarily unavailable.'
       );
     }
 
@@ -3049,16 +3756,13 @@ app.post(
         contents: message,
         config: {
           systemInstruction:
-            'You are the Hindi-first assistant for ' +
-            'Rahul Jewellers Sheoganj, Rajasthan. ' +
-            'The showroom sells Gold and Silver jewellery. ' +
-            'The 12+1 savings scheme is GOLD ONLY. ' +
-            'Customers pay 12 monthly installments. ' +
-            'In the following month, eligible customers ' +
-            'get 100% off labour/making charges on ' +
-            'gold jewellery, subject to terms. ' +
-            'There is NO free 13th installment or extra gold. ' +
-            'UPI submissions remain Pending until admin verifies.'
+            `You are the Hindi-first assistant for Rahul Jewellers Sheoganj, Rajasthan. ` +
+            `The showroom sells Gold and Silver jewellery. ` +
+            `The 12+1 savings scheme is GOLD ONLY. ` +
+            `Customers pay 12 monthly installments, and in the following month eligible customers get 100% off labour/making charges on gold jewellery, subject to terms. ` +
+            `There is NO free 13th installment, free extra gold, or silver savings scheme. ` +
+            `UPI installment submissions remain Pending until admin verifies. ` +
+            `Never claim a manually entered gold rate is a live market rate.`
         }
       });
 
@@ -3072,38 +3776,38 @@ app.post(
 );
 
 // ============================================================
-// DISABLE UNSAFE LEGACY SCHEME ROUTES
+// DISABLE OLD UNVERIFIED SCHEME ROUTES
 // ============================================================
 
 app.use(
   '/api/schemes',
-  (_req, res) => {
+  (_req, res) =>
     res.status(410).json({
       success: false,
       message:
-        'Legacy scheme routes disabled. Use verified payment APIs.'
-    });
-  }
+        'Legacy scheme routes disabled. Use verified customer/admin payment APIs.'
+    })
 );
 
 // ============================================================
-// ERROR HANDLER
+// ERROR HANDLING
 // ============================================================
 
 app.use(
-  (error, _req, res, _next) => {
+  (err, _req, res, _next) => {
     if (
-      error instanceof
+      err instanceof
       mongoose.Error.ValidationError
     ) {
       return res.status(400).json({
         success: false,
-        message: error.message
+        message:
+          err.message
       });
     }
 
     if (
-      error?.code === 11000
+      err?.code === 11000
     ) {
       return res.status(409).json({
         success: false,
@@ -3112,18 +3816,19 @@ app.use(
       });
     }
 
-    if (error?.status) {
+    if (err?.status) {
       return res.status(
-        error.status
+        err.status
       ).json({
         success: false,
-        message: error.message
+        message:
+          err.message
       });
     }
 
     console.error(
       'Backend error:',
-      error
+      err
     );
 
     res.status(500).json({
@@ -3135,11 +3840,10 @@ app.use(
 );
 
 // ============================================================
-// DATABASE CONNECTION
+// START SERVER
 // ============================================================
 
-mongoose
-  .connect(MONGO_URI)
+mongoose.connect(MONGO_URI)
   .then(async () => {
     await User.updateMany(
       {
@@ -3175,17 +3879,16 @@ mongoose
     app.listen(
       PORT,
       '0.0.0.0',
-      () => {
+      () =>
         console.log(
           `Rahul Jewellers backend listening on ${PORT}`
-        );
-      }
+        )
     );
   })
-  .catch(error => {
+  .catch(err => {
     console.error(
       'MongoDB startup error:',
-      error
+      err
     );
 
     process.exitCode = 1;
