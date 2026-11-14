@@ -1,66 +1,60 @@
-import express from 'express';
+
 import mongoose from 'mongoose';
 
-const router = express.Router();
+// ==========================================
+// RAHUL JEWELLERS
+// GOLD SAVINGS SCHEME DATABASE MODEL
+// ==========================================
 
-// Explicit schema definition for reliable data manipulation and validation
-const schemeSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  status: { 
-    type: String, 
-    enum: ['Active', 'PendingAdminReview', 'Completed', 'Cancelled'], 
-    default: 'Active' 
+const schemeSchema = new mongoose.Schema(
+  {
+    // Customer linked with this scheme
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+      index: true
+    },
+
+    // Current scheme status
+    status: {
+      type: String,
+      enum: [
+        'Active',
+        'GracePeriod',
+        'PendingAdminReview',
+        'Completed',
+        'Cancelled'
+      ],
+      default: 'Active'
+    },
+
+    // Next installment due date
+    dueDate: {
+      type: Date,
+      required: true
+    },
+
+    // Grace period tracking
+    gracePeriodStartDate: {
+      type: Date,
+      default: null
+    }
   },
-  dueDate: { type: Date, required: true },
-  gracePeriodStartDate: { type: Date, default: null }
-}, { timestamps: true });
-
-// Get the Scheme model safely whether it's registered or not
-const Scheme = mongoose.models.Scheme || mongoose.model('Scheme', schemeSchema);
-
-// ** Successful Payment Endpoint (Shifts Due Date)**
-router.post('/:id/pay', async (req, res) => {
-  try {
-    const scheme = await Scheme.findById(req.params.id);
-    if (!scheme) return res.status(404).json({ success: false, error: 'Scheme not found' });
-
-    if (['Completed', 'Cancelled'].includes(scheme.status)) {
-      return res.status(400).json({ success: false, error: `Cannot pay for a ${scheme.status.toLowerCase()} scheme.` });
-    }
-
-    // Shift due date forward by 1 month
-    const currentDueDate = new Date(scheme.dueDate);
-    currentDueDate.setMonth(currentDueDate.getMonth() + 1);
-    scheme.dueDate = currentDueDate;
-
-    // Reset status back to Active and clear grace tracking
-    scheme.status = 'Active';
-    scheme.gracePeriodStartDate = null;
-
-    await scheme.save();
-    res.json({ success: true, message: 'Payment successful. Due date shifted by 1 month.', scheme });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+  {
+    timestamps: true
   }
+);
+
+// Faster customer scheme lookup
+schemeSchema.index({
+  userId: 1,
+  status: 1
 });
 
-// ** Admin Endpoint: Manual Cancellation after Grace Period**
-router.post('/admin/:id/cancel', async (req, res) => {
-  try {
-    const scheme = await Scheme.findById(req.params.id);
-    if (!scheme) return res.status(404).json({ success: false, error: 'Scheme not found' });
+// Prevent duplicate model registration
+const Scheme =
+  mongoose.models.Scheme ||
+  mongoose.model('Scheme', schemeSchema);
 
-    if (scheme.status !== 'PendingAdminReview') {
-      return res.status(400).json({ success: false, error: 'Scheme must be in Pending Admin Review state to be cancelled.' });
-    }
-
-    scheme.status = 'Cancelled';
-    await scheme.save();
-
-    res.json({ success: true, message: 'Scheme successfully cancelled by admin.', scheme });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-export default router;
+export default Scheme;

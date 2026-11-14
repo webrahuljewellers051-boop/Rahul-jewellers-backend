@@ -1,706 +1,745 @@
-import express from 'express';
-import mongoose from 'mongoose';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import { Resend } from 'resend';
-import cookieParser from 'cookie-parser';
-import jwt from 'jsonwebtoken';
-import rateLimit from 'express-rate-limit';
-import dns from 'dns';
-import { GoogleGenAI } from '@google/genai';
-import schemeRoutes from './routes/schemeRoutes.js';
-import './services/cronService.js';
-import fetch from 'node-fetch';
 
-dns.setServers(['8.8.8.8', '8.8.4.4']);
-dotenv.config();
+  // Rahul Jewellers Shivganj — replace jewel-backend/server.js with this file.
+  // Required .env: MONGO_URI, JWT_SECRET, ADMIN_EMAIL, RESEND_API_KEY, RESEND_FROM,
+  // CORS_ORIGINS (comma-separated customer/admin website origins).
+  // Optional: PORT, GEMINI_API_KEY, GEMINI_MODEL.
+  import express from 'express';
+  import mongoose from 'mongoose';
+  import cors from 'cors';
+  import dotenv from 'dotenv';
+  import { Resend } from 'resend';
+  import cookieParser from 'cookie-parser';
+  import jwt from 'jsonwebtoken';
+  import rateLimit from 'express-rate-limit';
+  import { randomInt, randomBytes, scrypt as scryptCallback, createHash, timingSafeEqual } from 'node:crypto';
+  import { promisify } from 'node:util';
+  import { GoogleGenAI } from '@google/genai';
+  // Legacy Scheme model/routes were inconsistent and unauthenticated in the uploaded project.
+  // Do not import or mount them until they are rewritten to use verified payments.
 
-const app = express();
-
-app.set('trust proxy', true);
-
-const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'RahulJewellers_JWT_Secret_2026_ChangeThisLater_9x7K2m';
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-// ==========================================
-// EXCLUSIVE 22K LIVE GOLD RATE REST POLLING
-// ==========================================
-const TROY_OUNCE_GRAMS = 31.1034768;
-
-let goldUsd = 2650; // Fallback initial market value
-let usdInr = 86.5;   // Fallback initial FX rate
-let goldLastUpdated = Date.now();
-let fxLastUpdated = Date.now();
-let goldClients = new Set();
-let apiConnected = true;
-
-// Calculate 22K INR per gram exclusively: (Spot / 31.1034) * (USDINR) * (22/24)
-function calculate22KGoldPriceINR() {
-  if (!Number.isFinite(goldUsd) || !Number.isFinite(usdInr)) {
-    return null;
-  }
-  const price24KPerGram = (goldUsd * usdInr) / TROY_OUNCE_GRAMS;
-  const price22KPerGram = price24KPerGram * (22 / 24);
-  return price22KPerGram;
-}
-
-// Broadcast 22K rate to connected frontend clients via SSE
-function broadcastGoldRate() {
-  const priceInrPerGram22K = calculate22KGoldPriceINR();
-  if (!Number.isFinite(priceInrPerGram22K)) return;
-
-  const payload = JSON.stringify({
-    type: 'gold',
-    carat: '22K',
-    priceInrPerGram: priceInrPerGram22K,
-    xauUsd: goldUsd,
-    usdInr: usdInr,
-    timestamp: Date.now(),
-    connected: apiConnected
-  });
-
-  for (const client of goldClients) {
-    try {
-      client.write(`data: ${payload}\n\n`);
-    } catch (error) {
-      console.error('Gold SSE client error:', error.message);
-    }
-  }
-}
-
-// Fetch live spot rates securely from an open-access endpoint (goldprice.dev)
-async function fetchLiveGoldFeed() {
-  try {
-    const goldRes = await fetch('https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT', {
-      signal: AbortSignal.timeout(10_000)
-    });
-    
-    if (goldRes.ok) {
-      const goldData = await goldRes.json();
-      if (goldData && goldData.symbols && goldData.symbols[0]) {
-        goldUsd = parseFloat(goldData.symbols[0].price);
-        goldLastUpdated = Date.now();
-        apiConnected = true;
-      }
-    }
-
-    const current22KPrice = calculate22KGoldPriceINR();
-    if (current22KPrice) {
-      console.log(`💰 LIVE 22K GOLD: ₹${current22KPrice.toFixed(2)}/g`);
-      broadcastGoldRate();
-    }
-  } catch (err) {
-    apiConnected = false;
-    console.error('❌ Live Gold Feed Fetch Error:', err.message);
-  }
-}
-
-// Poll every 30 seconds to keep live rates updated smoothly
-setInterval(fetchLiveGoldFeed, 30000);
-setTimeout(fetchLiveGoldFeed, 1000); // Initial fetch on startup
-
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header(
-    'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, ngrok-skip-browser-warning'
+  dotenv.config();
+  const app = express();
+  app.set('trust proxy', 1);
+  const PORT = Number(process.env.PORT || 5000);
+  const MONGO_URI = process.env.MONGO_URI;
+  const JWT_SECRET = process.env.JWT_SECRET;
+  const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'web.rahuljewellers051@gmail.com').trim().toLowerCase();
+  const RESEND_FROM = process.env.RESEND_FROM || 'onboarding@resend.dev';
+  if (!MONGO_URI) throw new Error('MONGO_URI is required.');
+  if (!JWT_SECRET || JWT_SECRET.length < 32) throw new Error('Set a strong JWT_SECRET of at least 32 characters.');
+  const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+  const ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
+  const scrypt = promisify(scryptCallback);
+  const allowedOrigins = new Set(
+    [process.env.CORS_ORIGINS, process.env.CLIENT_ORIGIN, process.env.ADMIN_ORIGIN]
+      .filter(Boolean).flatMap(x => x.split(',')).map(x => x.trim().replace(/\/$/, '')).filter(Boolean)
   );
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
-
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(cookieParser());
-
-const adminAuthLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { success: false, message: 'Too many login attempts. Please try again later.' }
-});
-
-app.get('/', (req, res) => {
-  res.send('🚀 Rahul Jewellers (Sheoganj) Backend is Live & Running!');
-});
-
-const HARDCODED_ADMIN_EMAIL = 'web.rahuljewellers051@gmail.com';
-const resend = new Resend(process.env.RESEND_API_KEY);
-const otpStorage = {};
-
-const MONGO_URI = process.env.MONGO_URI;
-if (!MONGO_URI) {
-  throw new Error('MONGO_URI is missing from backend environment variables.');
-}
-
-mongoose.connect(MONGO_URI)
-  .then(() => console.log('✅ CONNECTED TO MONGODB ATLAS'))
-  .catch((err) => console.error('❌ MONGODB ERROR:', err.message));
-
-// ==========================================
-// SCHEMAS & MODELS
-// ==========================================
-const storeSettingsSchema = new mongoose.Schema({
-  _id: { type: String, default: 'store_config' },
-  upiId: { type: String, default: '9950091024@okbizaxis' },
-  merchantName: { type: String, default: 'Rahul Jewellers' },
-  qrCodeUrl: { type: String, default: '' }
-}, { timestamps: true });
-
-const StoreSettings = mongoose.model('StoreSettings', storeSettingsSchema);
-
-const userSchema = new mongoose.Schema({
-  customerId: { type: String, required: true, unique: true },
-  name: { type: String, required: true },
-  phone: { type: String, required: true, unique: true },
-  email: { type: String, default: '' },
-  password: { type: String, required: true },
-  address: { type: String, default: '' },
-  customInstallment: { type: Number, default: 10000 },
-  paidMonths: { type: Number, default: 0 },
-  isLaborFree: { type: Boolean, default: false },
-  startDate: { type: String, default: () => new Date().toISOString().split('T')[0] },
-  finalDueDate: { type: String },
-  isActive: { type: Boolean, default: true },
-  paymentHistory: [
-    {
-      monthNum: { type: Number, required: true },
-      amount: { type: Number, required: true },
-      transactionId: { type: String, required: true },
-      paidAt: { type: Date, default: Date.now }
-    }
-  ],
-  cart: [{ product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' }, quantity: { type: Number, default: 1 } }],
-  wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product' }]
-}, { timestamps: true });
-
-const User = mongoose.model('User', userSchema);
-
-const categorySchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  description: { type: String, default: '' },
-  parentCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }
-}, { timestamps: true });
-
-const Category = mongoose.model('Category', categorySchema);
-
-const productSchema = new mongoose.Schema({
-  title: { type: String, required: true },
-  category: { type: String, required: true },
-  categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
-  weight: { type: String, required: true },
-  price: { type: Number, default: 0 },
-  imageUrl: { type: String, required: true }
-}, { timestamps: true });
-
-const Product = mongoose.model('Product', productSchema);
-
-app.use('/api/schemes', schemeRoutes);
-
-// ==========================================
-// AUTH & SESSION ENDPOINTS
-// ==========================================
-app.get('/api/client/admin-session', (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = (authHeader && authHeader.startsWith('Bearer ')) ? authHeader.split(' ')[1] : req.cookies.admin_token;
-  
-  if (!token) return res.status(401).json({ success: false, message: 'No session token' });
-  try {
-    jwt.verify(token, JWT_SECRET);
-    res.json({ success: true, message: 'Session active' });
-  } catch (err) {
-    res.status(401).json({ success: false, message: 'Invalid session' });
-  }
-});
-
-app.post('/api/client/admin-logout', (req, res) => {
-  res.clearCookie('admin_token', { 
-    httpOnly: true, 
-    secure: true, 
-    sameSite: 'none' 
+  app.use(cors({
+    origin(origin, cb) {
+      if (!origin || allowedOrigins.has(origin) ||
+        (process.env.NODE_ENV !== 'production' && /^http:\/\/localhost(?::\d+)?$/.test(origin))) return cb(null, true);
+      return cb(new Error('Origin not allowed; configure CORS_ORIGINS.'));
+    },
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
+  }));
+  app.use(express.json({ limit: '15mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+  app.use(cookieParser());
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false,
+    message: { success: false, message: 'Too many attempts. Please try again later.' }
   });
-  res.json({ success: true, message: 'Logged out successfully' });
-});
-
-app.post('/api/client/send-email-otp', adminAuthLimiter, async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email || email.trim().toLowerCase() !== HARDCODED_ADMIN_EMAIL.toLowerCase()) {
-      return res.status(403).json({ success: false, message: 'Access Denied. Unauthorized Email.' });
+  class ApiError extends Error {
+    constructor(status, message) { super(message); this.status = status; }
+  }
+  const bad = (status, message) => { throw new ApiError(status, message); };
+  const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+  const clean = value => String(value ?? '').trim();
+  const safe = (value, limit = 300) => clean(value).slice(0, limit);
+  const validId = value => mongoose.isValidObjectId(value);
+  const validPhone = value => /^[6-9]\d{9}$/.test(value);
+  const validAmount = value => Number.isFinite(value) && value >= 1000 && value <= 1000000;
+  const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  function istParts(date, fields) {
+    return Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', ...fields })
+      .formatToParts(date).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  }
+  function istDate(date = new Date()) {
+    const p = istParts(date, { year: 'numeric', month: '2-digit', day: '2-digit' });
+    return `${p.year}-${p.month}-${p.day}`;
+  }
+  function istMonth(date = new Date()) {
+    const p = istParts(date, { year: 'numeric', month: '2-digit' });
+    return Number(p.year) * 12 + Number(p.month);
+  }
+  function validDate(s) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+    const d = new Date(`${s}T00:00:00.000Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s && s <= istDate();
+  }
+  async function hashPassword(password) {
+    const salt = randomBytes(16).toString('hex');
+    return `scrypt$${salt}$${(await scrypt(password, salt, 64)).toString('hex')}`;
+  }
+  async function verifyPassword(password, stored) {
+    if (typeof stored !== 'string') return false;
+    if (stored.startsWith('scrypt$')) {
+      const [, salt, hex] = stored.split('$');
+      if (!/^[a-f0-9]{32}$/i.test(salt || '') || !/^[a-f0-9]{128}$/i.test(hex || '')) return false;
+      return timingSafeEqual(await scrypt(password, salt, 64), Buffer.from(hex, 'hex'));
     }
+    // Legacy plaintext users are upgraded to scrypt on their first successful login.
+    const a = Buffer.from(password), b = Buffer.from(stored);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+  const StoreSettings = mongoose.models.StoreSettings || mongoose.model('StoreSettings', new mongoose.Schema({
+    _id: { type: String, default: 'store_config' },
+    upiId: { type: String, default: '' },
+    merchantName: { type: String, default: 'Rahul Jewellers' },
+    qrCodeUrl: { type: String, default: '' }
+  }, { timestamps: true }));
+  const paymentHistorySchema = new mongoose.Schema({
+    monthNum: { type: Number, required: true, min: 1, max: 12 },
+    amount: { type: Number, required: true },
+    transactionId: { type: String, required: true },
+    paidAt: { type: Date, default: Date.now },
+    verifiedAt: { type: Date },
+    method: { type: String, default: 'Manual' }
+  }, { _id: false });
+  const userSchema = new mongoose.Schema({
+    customerId: { type: String, required: true, unique: true },
+    name: { type: String, required: true },
+    dob: { type: String, default: '' },
+    phone: { type: String, required: true, unique: true },
+    email: { type: String, default: '' },
+    password: { type: String, required: true, select: false },
+    address: { type: String, default: '' },
+    schemeJoined: { type: Boolean, default: false },
+    schemeJoinedAt: { type: Date },
+    customInstallment: { type: Number, default: 10000 },
+    paidMonths: { type: Number, default: 0, min: 0, max: 12 },
+    isLaborFree: { type: Boolean, default: false },
+    startDate: { type: String, default: '' },
+    finalDueDate: { type: String, default: '' },
+    isActive: { type: Boolean, default: true },
+    paymentHistory: { type: [paymentHistorySchema], default: [] },
+    cart: [{ product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' }, quantity: { type: Number, default: 1 } }],
+    wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product' }]
+  }, { timestamps: true });
+  const User = mongoose.models.User || mongoose.model('User', userSchema);
+  const Category = mongoose.models.Category || mongoose.model('Category', new mongoose.Schema({
+    name: { type: String, required: true },
+    description: { type: String, default: '' },
+    parentCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }
+  }, { timestamps: true }));
+  const Product = mongoose.models.Product || mongoose.model('Product', new mongoose.Schema({
+    title: { type: String, required: true },
+    category: { type: String, required: true },
+    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
+    weight: { type: String, required: true },
+    price: { type: Number, default: 0 },
+    imageUrl: { type: String, required: true }
+  }, { timestamps: true }));
+  const paymentRequestSchema = new mongoose.Schema({
+    customer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    customerId: { type: String, required: true },
+    monthNum: { type: Number, required: true, min: 1, max: 12 },
+    amount: { type: Number, required: true },
+    transactionId: { type: String, required: true, unique: true },
+    status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending', index: true },
+    reviewedAt: Date, reviewedBy: String, rejectionReason: { type: String, default: '' }
+  }, { timestamps: true });
+  paymentRequestSchema.index({ customer: 1, monthNum: 1 },
+    { unique: true, partialFilterExpression: { status: 'Pending' } });
+  const PaymentRequest = mongoose.models.PaymentRequest || mongoose.model('PaymentRequest', paymentRequestSchema);
+  const GoldRate = mongoose.models.GoldRate || mongoose.model('GoldRate', new mongoose.Schema({
+    _id: { type: String, default: 'published_gold_rate' },
+    enabled: { type: Boolean, default: false },
+    carat: { type: String, default: '22K' },
+    priceInrPerGram: { type: Number, default: 0 },
+    updatedBy: { type: String, default: 'admin' }
+  }, { timestamps: true }));
+  function discountEligible(c) {
+    if (!c || !c.schemeJoined || Number(c.paidMonths || 0) < 12) return false;
+    const final = (c.paymentHistory || []).find(p => Number(p.monthNum) === 12);
+    const date = final?.verifiedAt || final?.paidAt;
+    return Boolean(date && istMonth(new Date()) > istMonth(new Date(date)));
+  }
+  function publicCustomer(c) {
+    if (!c) return null;
+    const obj = typeof c.toObject === 'function' ? c.toObject() : { ...c };
+    delete obj.password; delete obj.__v;
+    obj.eligibleForMakingChargeDiscount = discountEligible(obj);
+    obj.isLaborFree = obj.eligibleForMakingChargeDiscount;
+    return obj;
+  }
+  function customerToken(c) {
+    return jwt.sign({ sub: String(c._id), role: 'customer', type: 'customer' }, JWT_SECRET, { expiresIn: '7d' });
+  }
+  function readToken(req, cookieName) {
+    const auth = req.headers.authorization;
+    return typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : req.cookies?.[cookieName];
+  }
+  function adminAuth(req, res, next) {
+    try {
+      const token = readToken(req, 'admin_token');
+      if (!token) return res.status(401).json({ success: false, message: 'Admin login required.' });
+      const p = jwt.verify(token, JWT_SECRET);
+      if (!(p.type === 'admin' || p.role === 'admin' ||
+        (!p.type && !p.role && clean(p.email).toLowerCase() === ADMIN_EMAIL))) {
+        return res.status(403).json({ success: false, message: 'Admin access only.' });
+      }
+      next();
+    } catch {
+      res.status(401).json({ success: false, message: 'Admin session expired.' });
+    }
+  }
+  const customerAuth = wrap(async (req, res, next) => {
+    const token = readToken(req, 'customer_token');
+    if (!token) bad(401, 'Customer login required.');
+    let p;
+    try { p = jwt.verify(token, JWT_SECRET); } catch { bad(401, 'Customer session expired.'); }
+    if (p.type !== 'customer' && p.role !== 'customer') bad(403, 'Customer access only.');
+    if (!validId(p.sub)) bad(401, 'Invalid customer token.');
+    const customer = await User.findById(p.sub);
+    if (!customer) bad(401, 'Customer account not found.');
+    if (customer.isActive === false) bad(403, 'Account deactivated.');
+    req.customer = customer;
+    next();
+  });
+  app.get('/', (_req, res) => res.send('Rahul Jewellers Shivganj Backend is Running'));
+  app.get('/health', (_req, res) => res.json({ success: true, database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' }));
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStorage[email.trim().toLowerCase()] = otp;
-
-    await resend.emails.send({
-      from: 'onboarding@resend.dev',
-      to: [HARDCODED_ADMIN_EMAIL],
-      subject: 'Admin Login OTP - Rahul Jewellers',
-      html: `<p>Your secure admin verification code is: <strong>${otp}</strong></p>`
+  // ============================================================
+  // ADMIN EMAIL OTP
+  // ============================================================
+  const otpStorage = new Map();
+  app.post('/api/client/send-email-otp', loginLimiter, wrap(async (req, res) => {
+    const email = clean(req.body.email).toLowerCase();
+    if (email !== ADMIN_EMAIL) bad(403, 'Unauthorized admin email.');
+    if (!resend) bad(503, 'RESEND_API_KEY is not configured.');
+    const otp = String(randomInt(100000, 1000000));
+    const result = await resend.emails.send({
+      from: RESEND_FROM, to: [ADMIN_EMAIL],
+      subject: 'Rahul Jewellers Admin Login OTP',
+      html: `<p>Your admin verification code: <strong>${otp}</strong> (valid for 5 minutes).</p>`
     });
-
-    res.json({ success: true, message: 'Admin OTP sent successfully to your inbox!' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post('/api/client/verify-email-otp', adminAuthLimiter, (req, res) => {
-  const { email, otp } = req.body;
-  const cleanEmail = email ? email.trim().toLowerCase() : '';
-
-  if (cleanEmail !== HARDCODED_ADMIN_EMAIL.toLowerCase() || otpStorage[cleanEmail] !== otp) {
-    return res.status(401).json({ success: false, message: 'Invalid OTP code or unauthorized email.' });
-  }
-  
-  delete otpStorage[cleanEmail];
-  const token = jwt.sign({ email: HARDCODED_ADMIN_EMAIL }, JWT_SECRET, { expiresIn: '7d' });
-  
-  res.json({ success: true, message: 'Admin verified successfully!', token });
-});
-
-// ==========================================
-// API ROUTES: PRODUCTS & CATEGORIES
-// ==========================================
-app.get('/api/products', async (req, res) => {
-  try {
-    const products = await Product.find().sort({ createdAt: -1 });
-    res.json({ success: true, products });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post('/api/admin/products', async (req, res) => {
-  try {
-    const { title, category, weight, price, imageUrl, categoryId } = req.body;
-    const cleanPrice = price !== undefined && price !== '' 
-      ? Number(String(price).replace(/[^0-9.-]+/g, '')) 
-      : 0;
-
-    const newProduct = new Product({
-      title: title.trim(),
-      category: category.trim(),
-      weight: weight.trim(),
-      price: cleanPrice,
-      imageUrl: imageUrl,
-      categoryId: (categoryId && mongoose.Types.ObjectId.isValid(categoryId)) ? categoryId : null
+    if (result.error) bad(502, 'OTP email could not be sent. Check verified sender.');
+    otpStorage.set(email, {
+      hash: createHash('sha256').update(otp).digest('hex'),
+      expires: Date.now() + 300000, attempts: 0
     });
-    await newProduct.save();
-    res.status(201).json({ success: true, product: newProduct });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+    res.json({ success: true, message: 'Admin OTP sent.' });
+  }));
+  app.post('/api/client/verify-email-otp', loginLimiter, wrap(async (req, res) => {
+    const email = clean(req.body.email).toLowerCase();
+    const otp = clean(req.body.otp);
+    const record = otpStorage.get(email);
+    if (email !== ADMIN_EMAIL || !record || record.expires < Date.now() || record.attempts >= 5)
+      bad(401, 'OTP expired or invalid.');
+    record.attempts++;
+    if (!/^\d{6}$/.test(otp) ||
+      !timingSafeEqual(createHash('sha256').update(otp).digest(), Buffer.from(record.hash, 'hex')))
+      bad(401, 'Incorrect OTP.');
+    otpStorage.delete(email);
+    const token = jwt.sign({ sub: 'admin', type: 'admin', role: 'admin', email }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ success: true, token, message: 'Admin verified.' });
+  }));
+  app.get('/api/client/admin-session', adminAuth, (_req, res) => res.json({ success: true, message: 'Session active.' }));
+  app.post('/api/client/admin-logout', (_req, res) => {
+    res.clearCookie('admin_token', { httpOnly: true, secure: true, sameSite: 'none' });
+    res.json({ success: true });
+  });
 
-app.delete('/api/admin/products/:id', async (req, res) => {
-  try {
-    await Product.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: 'Product deleted from showroom.' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.get('/api/categories', async (req, res) => {
-  try {
-    const categories = await Category.find().populate('parentCategory').sort({ createdAt: -1 });
-    res.json({ success: true, categories });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post('/api/admin/categories', async (req, res) => {
-  try {
-    const { name, description, parentCategory } = req.body;
-    const newCat = new Category({
-      name: name.trim(),
-      description: description ? description.trim() : '',
-      parentCategory: (parentCategory && mongoose.Types.ObjectId.isValid(parentCategory)) ? parentCategory : null
-    });
-    await newCat.save();
-    res.status(201).json({ success: true, category: newCat });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.delete('/api/admin/categories/:id', async (req, res) => {
-  try {
-    await Category.findByIdAndDelete(req.params.id);
+  // ============================================================
+  // SHOWROOM PRODUCTS: GOLD AND SILVER BOTH ALLOWED
+  // ============================================================
+  app.get('/api/products', wrap(async (_req, res) => {
+    res.json({ success: true, products: await Product.find().sort({ createdAt: -1 }).lean() });
+  }));
+  app.post('/api/admin/products', adminAuth, wrap(async (req, res) => {
+    const title = safe(req.body.title, 150), category = safe(req.body.category, 60);
+    const weight = safe(req.body.weight, 80), imageUrl = clean(req.body.imageUrl);
+    const price = req.body.price == null || req.body.price === '' ? 0 : Number(req.body.price);
+    if (!title || !category || !weight) bad(400, 'Product name, category and weight are required.');
+    if (!Number.isFinite(price) || price < 0) bad(400, 'Invalid price.');
+    if (!/^(data:image\/(?:png|jpeg|webp|gif);base64,|https:\/\/)/i.test(imageUrl))
+      bad(400, 'Valid image is required.');
+    const categoryId = validId(req.body.categoryId) ? req.body.categoryId : null;
+    const product = await Product.create({ title, category, weight, imageUrl, price, categoryId });
+    res.status(201).json({ success: true, product });
+  }));
+  app.delete('/api/admin/products/:id', adminAuth, wrap(async (req, res) => {
+    if (!validId(req.params.id)) bad(400, 'Invalid product ID.');
+    if (!await Product.findByIdAndDelete(req.params.id)) bad(404, 'Product not found.');
+    res.json({ success: true, message: 'Product deleted.' });
+  }));
+  app.get('/api/categories', wrap(async (_req, res) => {
+    res.json({ success: true, categories: await Category.find().populate('parentCategory').sort({ createdAt: -1 }).lean() });
+  }));
+  app.post('/api/admin/categories', adminAuth, wrap(async (req, res) => {
+    const name = safe(req.body.name, 100);
+    if (!name) bad(400, 'Category name is required.');
+    const parentCategory = validId(req.body.parentCategory) ? req.body.parentCategory : null;
+    if (parentCategory && !await Category.exists({ _id: parentCategory })) bad(404, 'Parent category not found.');
+    const category = await Category.create({ name, description: safe(req.body.description, 400), parentCategory });
+    res.status(201).json({ success: true, category });
+  }));
+  app.delete('/api/admin/categories/:id', adminAuth, wrap(async (req, res) => {
+    if (!validId(req.params.id)) bad(400, 'Invalid category ID.');
+    if (await Product.exists({ categoryId: req.params.id })) bad(409, 'Move products out of this category first.');
+    if (await Category.exists({ parentCategory: req.params.id })) bad(409, 'Delete subcategories first.');
+    if (!await Category.findByIdAndDelete(req.params.id)) bad(404, 'Category not found.');
     res.json({ success: true, message: 'Category deleted.' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+  }));
 
-// ==========================================
-// API ROUTES: CUSTOMERS & PASSBOOK
-// ==========================================
-app.post('/api/customer/login', async (req, res) => {
-  try {
-    const { identifier, password } = req.body;
-    const cleanIdentifier = identifier.trim();
-    const cleanPassword = password.trim();
-    const customer = await User.findOne({
-      $or: [
-        { customerId: { $regex: new RegExp(`^${cleanIdentifier}$`, 'i') } },
-        { phone: cleanIdentifier }
-      ]
+  // ============================================================
+  // CUSTOMER REGISTRATION: ACCOUNT IS NOT AUTOMATIC SCHEME JOIN
+  // ============================================================
+  async function createCustomer({ name, dob = '', phone, address = '', password, schemeJoined = false,
+                                  customInstallment = 10000, startDate = '' }) {
+    return User.create({
+      customerId: `RJ${randomInt(100000000, 1000000000)}`,
+      name, dob, phone, address, password: await hashPassword(password),
+      schemeJoined, schemeJoinedAt: schemeJoined ? new Date() : undefined,
+      customInstallment, startDate: schemeJoined ? (startDate || istDate()) : '',
+      paidMonths: 0, isLaborFree: false, isActive: true
     });
-    if (!customer) return res.status(404).json({ success: false, message: 'Account not found.' });
-    if (customer.password !== cleanPassword) return res.status(401).json({ success: false, message: 'Incorrect password.' });
-    if (customer.isActive === false) {
-      return res.status(403).json({ success: false, message: 'Your account has been deactivated by the store admin. Please contact Rahul Jewellers.' });
-    }
-    res.json({ success: true, customer });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
   }
-});
+  app.post('/api/customer/register', loginLimiter, wrap(async (req, res) => {
+    const name = safe(req.body.name, 100), dob = clean(req.body.dob);
+    const phone = clean(req.body.phone), address = safe(req.body.address, 500);
+    const password = String(req.body.password ?? '');
+    if (!name || !validPhone(phone) || !validDate(dob))
+      bad(400, 'Valid name, date of birth (YYYY-MM-DD) and Indian mobile are required.');
+    if (password.length < 8 || password.length > 128) bad(400, 'Password must have 8–128 characters.');
+    if (req.body.confirmPassword !== undefined && req.body.confirmPassword !== password)
+      bad(400, 'Passwords do not match.');
+    if (await User.exists({ phone })) bad(409, 'Mobile number already registered.');
+    const customer = await createCustomer({ name, dob, phone, address, password });
+    res.status(201).json({ success: true, customer: publicCustomer(customer), token: customerToken(customer) });
+  }));
+  app.post('/api/customer/login', loginLimiter, wrap(async (req, res) => {
+    const identifier = clean(req.body.identifier), password = String(req.body.password ?? '');
+    if (!identifier || !password) bad(400, 'Customer ID/mobile and password required.');
+    const customer = await User.findOne({ $or: [
+      { customerId: { $regex: `^${escapeRegex(identifier)}$`, $options: 'i' } },
+      { phone: identifier }
+    ] }).select('+password');
+    if (!customer || !await verifyPassword(password, customer.password)) bad(401, 'Incorrect login details.');
+    if (customer.isActive === false) bad(403, 'Account deactivated. Contact Rahul Jewellers Shivganj.');
+    if (!customer.password.startsWith('scrypt$')) {
+      customer.password = await hashPassword(password);
+      await customer.save();
+    }
+    res.json({ success: true, customer: publicCustomer(customer), token: customerToken(customer) });
+  }));
+  app.get('/api/customer/profile/:id', customerAuth, wrap(async (req, res) => {
+    if (String(req.customer._id) !== req.params.id) bad(403, 'Access denied to this profile.');
+    res.json({ success: true, customer: publicCustomer(req.customer) });
+  }));
+  async function updateCustomerProfile(req, res) {
+    const c = req.customer;
+    const id = req.params.id || req.body.userId;
+    if (id && String(id) !== String(c._id)) bad(403, 'You can only edit your account.');
+    if (req.body.name !== undefined) {
+      const name = safe(req.body.name, 100);
+      if (!name) bad(400, 'Name cannot be empty.');
+      c.name = name;
+    }
+    if (req.body.address !== undefined) c.address = safe(req.body.address, 500);
+    if (req.body.dob !== undefined) {
+      if (!validDate(clean(req.body.dob))) bad(400, 'Invalid date of birth.');
+      c.dob = clean(req.body.dob);
+    }
+    if (req.body.phone !== undefined && clean(req.body.phone) !== c.phone) {
+      const phone = clean(req.body.phone);
+      if (!validPhone(phone)) bad(400, 'Invalid Indian mobile.');
+      if (await User.exists({ phone, _id: { $ne: c._id } })) bad(409, 'Mobile already registered.');
+      c.phone = phone;
+    }
+    if (req.body.password) {
+      const newPassword = String(req.body.password), currentPassword = String(req.body.currentPassword || '');
+      if (newPassword.length < 8 || newPassword.length > 128) bad(400, 'New password must have 8–128 characters.');
+      if (!currentPassword) bad(400, 'Current password required to change password.');
+      const existing = await User.findById(c._id).select('+password');
+      if (!existing || !await verifyPassword(currentPassword, existing.password)) bad(401, 'Current password incorrect.');
+      c.password = await hashPassword(newPassword);
+    }
+    await c.save();
+    const customer = publicCustomer(c);
+    res.json({ success: true, customer, user: customer });
+  }
+  app.put('/api/customer/update-profile/:id', customerAuth, wrap(updateCustomerProfile));
+  app.put('/api/customer/settings/update', customerAuth, wrap(updateCustomerProfile));
+  app.post('/api/customer/wishlist/toggle', customerAuth, wrap(async (req, res) => {
+    if (req.body.userId && String(req.body.userId) !== String(req.customer._id)) bad(403, 'Access denied.');
+    const productId = req.body.productId;
+    if (!validId(productId) || !await Product.exists({ _id: productId })) bad(404, 'Product not found.');
+    if (req.customer.wishlist.some(id => String(id) === String(productId)))
+      req.customer.wishlist.pull(productId);
+    else req.customer.wishlist.addToSet(productId);
+    await req.customer.save();
+    const customer = publicCustomer(req.customer);
+    res.json({ success: true, customer, user: customer });
+  }));
 
-app.get('/api/customer/profile/:id', async (req, res) => {
-  try {
+  // ============================================================
+  // GOLD-ONLY 12+1 SCHEME — SEPARATE JOIN ACTION
+  // ============================================================
+  app.post('/api/customer/join-scheme', customerAuth, wrap(async (req, res) => {
+    const amount = Number(req.body.amount ?? req.body.customInstallment);
+    if (!validAmount(amount)) bad(400, 'Monthly amount must be ₹1,000 to ₹10,00,000.');
+    if (req.customer.schemeJoined) bad(409, 'Already joined the Gold Scheme.');
+    const updated = await User.findOneAndUpdate(
+      { _id: req.customer._id, schemeJoined: { $ne: true }, paidMonths: 0 },
+      { $set: { schemeJoined: true, schemeJoinedAt: new Date(),
+        customInstallment: amount, startDate: istDate(), isLaborFree: false } },
+      { new: true }
+    );
+    if (!updated) bad(409, 'Scheme state changed. Refresh and try again.');
+    res.json({ success: true, customer: publicCustomer(updated), message: 'Gold Scheme joined.' });
+  }));
+
+  // Customer UTR submission NEVER marks an installment paid automatically.
+  app.post('/api/customer/pay-installment', customerAuth, wrap(async (req, res) => {
+    const c = req.customer;
+    if (req.body.userId && String(req.body.userId) !== String(c._id)) bad(403, 'Not your scheme.');
+    if (!c.schemeJoined) bad(409, 'Join Gold Scheme first.');
+    const monthNum = Number(req.body.monthNum), amount = Number(req.body.amount);
+    const transactionId = clean(req.body.transactionId ?? req.body.utr).toUpperCase();
+    if (!Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12) bad(400, 'Invalid month.');
+    if (monthNum !== Number(c.paidMonths || 0) + 1) bad(409, 'Only the next unpaid installment can be submitted.');
+    if (amount !== Number(c.customInstallment)) bad(400, 'Amount must match your monthly installment.');
+    if (!/^[A-Z0-9]{10,20}$/.test(transactionId)) bad(400, 'UTR must contain 10–20 letters/digits.');
+    if (await User.exists({ 'paymentHistory.transactionId': transactionId }))
+      bad(409, 'UTR already verified.');
+    if (await PaymentRequest.exists({ customer: c._id, monthNum, status: 'Pending' }))
+      bad(409, 'A payment for this month is already pending review.');
+    const paymentRequest = await PaymentRequest.create({
+      customer: c._id, customerId: c.customerId, monthNum, amount, transactionId
+    });
+    res.status(201).json({
+      success: true, verified: false, status: 'Pending',
+      message: 'Submitted for admin verification. Your paid months have NOT increased yet.',
+      paymentRequest, request: paymentRequest, customer: publicCustomer(c)
+    });
+  }));
+  app.get('/api/customer/payment-requests', customerAuth, wrap(async (req, res) => {
+    const requests = await PaymentRequest.find({ customer: req.customer._id }).sort({ createdAt: -1 }).lean();
+    res.json({ success: true, requests, paymentRequests: requests });
+  }));
+
+  // ============================================================
+  // ADMIN CUSTOMER DIRECTORY / CREATION / STATUS
+  // ============================================================
+  app.get('/api/admin/customers', adminAuth, wrap(async (_req, res) => {
+    const customers = (await User.find().select('-password').sort({ createdAt: -1 }).lean()).map(publicCustomer);
+    res.json({ success: true, customers, users: customers });
+  }));
+  app.post('/api/admin/create-customer', adminAuth, wrap(async (req, res) => {
+    const name = safe(req.body.name, 100), phone = clean(req.body.phone);
+    const dob = clean(req.body.dob), address = safe(req.body.address, 500);
+    const password = String(req.body.password ?? '');
+    if (!name || !validPhone(phone)) bad(400, 'Valid name and Indian mobile required.');
+    if (dob && !validDate(dob)) bad(400, 'Invalid date of birth.');
+    if (password.length < 8 || password.length > 128) bad(400, 'Password must have 8–128 characters.');
+    if (await User.exists({ phone })) bad(409, 'Mobile already registered.');
+    // Existing admin passbook form explicitly sends installment AND startDate.
+    // Website registration does NOT automatically join the scheme.
+    const join = req.body.schemeJoined === true ||
+      (req.body.schemeJoined !== false && req.body.customInstallment != null && Boolean(req.body.startDate));
+    const amount = Number(req.body.customInstallment ?? 10000);
+    const startDate = clean(req.body.startDate);
+    if (join && !validAmount(amount)) bad(400, 'Invalid monthly installment.');
+    if (join && startDate && !validDate(startDate)) bad(400, 'Invalid start date.');
+    const customer = await createCustomer({
+      name, phone, dob, address, password, schemeJoined: join,
+      customInstallment: join ? amount : 10000, startDate: join ? startDate || istDate() : ''
+    });
+    res.status(201).json({ success: true, customer: publicCustomer(customer) });
+  }));
+  app.put('/api/admin/customer-status/:id', adminAuth, wrap(async (req, res) => {
+    if (!validId(req.params.id) || typeof req.body.isActive !== 'boolean')
+      bad(400, 'Valid ID and isActive boolean required.');
+    const customer = await User.findByIdAndUpdate(req.params.id, { isActive: req.body.isActive }, { new: true });
+    if (!customer) bad(404, 'Customer not found.');
+    res.json({ success: true, customer: publicCustomer(customer) });
+  }));
+  app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) => {
+    if (!validId(req.params.id)) bad(400, 'Invalid customer ID.');
     const customer = await User.findById(req.params.id);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
-    if (customer.isActive === false) {
-      return res.status(403).json({ success: false, message: 'Account deactivated.' });
-    }
-    res.json({ success: true, customer });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.put('/api/customer/update-profile/:id', async (req, res) => {
-  try {
-    const { name, phone, password, address } = req.body;
-    const customer = await User.findById(req.params.id);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
-
-    if (name) customer.name = name.trim();
-    if (phone) customer.phone = phone.trim();
-    if (password) customer.password = password.trim();
-    if (address !== undefined) customer.address = address.trim();
-
-    await customer.save();
-    res.json({ success: true, customer });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post('/api/admin/manual-passbook-update', async (req, res) => {
-  try {
-    const { userId, monthNum, action } = req.body;
-    const customer = await User.findById(userId);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
-    if (!customer.paymentHistory) customer.paymentHistory = [];
-    const targetMonth = Number(monthNum);
-
-    if (action === 'PAY') {
-      if (targetMonth > 1) {
-        const previousPaid = customer.paymentHistory.some(p => p.monthNum === targetMonth - 1);
-        if (!previousPaid) {
-          return res.status(400).json({ success: false, message: `Month #${targetMonth - 1} must be paid first.` });
-        }
-      }
-      if (targetMonth > customer.paidMonths) customer.paidMonths = targetMonth;
-      
-      const idx = customer.paymentHistory.findIndex(p => p.monthNum === targetMonth);
-      const installmentAmount = customer.customInstallment || 10000;
-
-      if (idx > -1) {
-        customer.paymentHistory[idx].transactionId = 'VERIFIED_WHATSAPP_SS';
-        customer.paymentHistory[idx].amount = installmentAmount;
-      } else {
-        customer.paymentHistory.push({ 
-          monthNum: targetMonth, 
-          amount: installmentAmount, 
-          transactionId: 'VERIFIED_WHATSAPP_SS' 
-        });
-      }
-
-      if (customer.paidMonths >= 12) {
-        customer.isLaborFree = true;
-      }
-    } else if (action === 'UNPAY') {
-      const higherPaid = customer.paymentHistory.some(p => p.monthNum > targetMonth);
-      if (higherPaid) return res.status(400).json({ success: false, message: 'Cannot unpay while subsequent months are paid.' });
-      
-      customer.paymentHistory = customer.paymentHistory.filter(p => p.monthNum !== targetMonth);
-      customer.paidMonths = Math.max(0, targetMonth - 1);
-      
-      if (customer.paidMonths < 12) {
-        customer.isLaborFree = false;
-      }
-    }
-    
-    await customer.save();
-    const updatedCustomer = await User.findById(userId);
-    res.json({ success: true, customer: updatedCustomer });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post('/api/customer/redeem-scheme', async (req, res) => {
-  try {
-    const { userId, standardMakingCharges } = req.body;
-    const customer = await User.findById(userId);
-    if (!customer) {
-      return res.status(404).json({ success: false, message: 'Customer account not found.' });
-    }
-
-    const totalAccumulatedSavings = customer.paymentHistory.reduce((sum, item) => sum + item.amount, 0);
-    const finalMakingCharges = customer.isLaborFree ? 0 : (standardMakingCharges || 0);
-
-    res.json({
-      success: true,
-      message: customer.isLaborFree 
-        ? 'Congratulations! 100% Making Charges Discount applied successfully.' 
-        : 'Standard rates applied.',
-      redemptionDetails: {
-        customerId: customer.customerId,
-        customerName: customer.name,
-        totalAccumulatedSavings,
-        standardMakingCharges: standardMakingCharges || 0,
-        makingChargesDiscountPercentage: customer.isLaborFree ? 100 : 0,
-        finalMakingChargesToPay: finalMakingCharges
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.get('/api/admin/customers', async (req, res) => {
-  try {
-    const users = await User.find().sort({ createdAt: -1 });
-    res.json({ success: true, users, customers: users });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post('/api/admin/create-customer', async (req, res) => {
-  try {
-    const { name, phone, password, customInstallment, startDate, finalDueDate } = req.body;
-    const cleanPhone = phone ? phone.trim() : '';
-
-    const existingUser = await User.findOne({ phone: cleanPhone });
-    if (existingUser) {
-      return res.status(400).json({ success: false, message: 'Login number already exist.' });
-    }
-
-    const lastUser = await User.findOne().sort({ createdAt: -1 });
-    let nextNum = 1001;
-    if (lastUser && lastUser.customerId && lastUser.customerId.startsWith('RJ')) {
-      const numPart = parseInt(lastUser.customerId.replace('RJ', ''), 10);
-      if (!isNaN(numPart)) nextNum = numPart + 1;
-    }
-    const customerId = `RJ${nextNum}`;
-
-    const newCustomer = new User({
-      customerId, 
-      name: name.trim(), 
-      phone: cleanPhone, 
-      password: password.trim(),
-      customInstallment: Number(customInstallment) || 10000, 
-      paidMonths: 0, 
-      isLaborFree: false,
-      isActive: true,
-      startDate: startDate || new Date().toISOString().split('T')[0],
-      finalDueDate: finalDueDate || ''
-    });
-    
-    await newCustomer.save();
-    res.status(201).json({ success: true, customer: newCustomer });
-  } catch (err) {
-    if (err.code === 11000) {
-      return res.status(400).json({ success: false, message: 'Login number already exist.' });
-    }
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.delete('/api/admin/delete-customer/:id', async (req, res) => {
-  try {
-    await User.findByIdAndDelete(req.params.id);
+    if (!customer) bad(404, 'Customer not found.');
+    if (Number(customer.paidMonths || 0) > 0 || await PaymentRequest.exists({ customer: customer._id }))
+      bad(409, 'Financial records exist. Deactivate this customer instead of deleting.');
+    await User.deleteOne({ _id: customer._id });
     res.json({ success: true, message: 'Customer deleted.' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+  }));
 
-app.put('/api/admin/customer-status/:id', async (req, res) => {
-  try {
-    const { isActive } = req.body;
-    const customer = await User.findById(req.params.id);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found.' });
-
-    customer.isActive = isActive;
-    await customer.save();
-    
-    res.json({ success: true, message: 'Customer status updated successfully.', customer });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// ==========================================
-// API ROUTES: STORE SETTINGS, REMINDERS & AI SUPPORT CHAT
-// ==========================================
-app.get('/api/store/settings', async (req, res) => {
-  try {
-    let settings = await StoreSettings.findById('store_config');
-    if (!settings) {
-      settings = await StoreSettings.create({ _id: 'store_config', upiId: '9950091024@okbizaxis', merchantName: 'Rahul Jewellers' });
+  // Manual passbook actions are admin-only and strictly sequential.
+  app.post('/api/admin/manual-passbook-update', adminAuth, wrap(async (req, res) => {
+    const userId = req.body.userId, monthNum = Number(req.body.monthNum);
+    const action = clean(req.body.action).toUpperCase();
+    if (!validId(userId) || !Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12 ||
+        !['PAY', 'UNPAY'].includes(action)) bad(400, 'Invalid passbook action.');
+    const c = await User.findById(userId);
+    if (!c) bad(404, 'Customer not found.');
+    if (!c.schemeJoined) bad(409, 'Customer has not joined Gold Scheme.');
+    if (c.isActive === false) bad(403, 'Customer is deactivated.');
+    if (action === 'PAY') {
+      if (monthNum !== Number(c.paidMonths || 0) + 1) bad(409, 'Only next unpaid month can be marked paid.');
+      if (await PaymentRequest.exists({ customer: c._id, monthNum, status: 'Pending' }))
+        bad(409, 'UPI request pending. Approve/reject it first.');
+      const now = new Date();
+      const updated = await User.findOneAndUpdate(
+        { _id: c._id, paidMonths: monthNum - 1, schemeJoined: true },
+        { $inc: { paidMonths: 1 },
+          $push: { paymentHistory: { monthNum, amount: c.customInstallment,
+            transactionId: `ADMIN_MANUAL_${Date.now()}_${randomInt(1000, 9999)}`,
+            paidAt: now, verifiedAt: now, method: 'AdminManual' } },
+          $set: { isLaborFree: false } },
+        { new: true }
+      );
+      if (!updated) bad(409, 'Passbook changed. Refresh and retry.');
+      return res.json({ success: true, customer: publicCustomer(updated) });
     }
-    res.json({ success: true, settings });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    if (monthNum !== Number(c.paidMonths || 0)) bad(409, 'Only latest paid month can be reversed.');
+    if (await PaymentRequest.exists({ customer: c._id, monthNum, status: 'Approved' }))
+      bad(409, 'Approved UPI payment cannot be reversed here; use audited refund process.');
+    const updated = await User.findOneAndUpdate(
+      { _id: c._id, paidMonths: monthNum },
+      { $inc: { paidMonths: -1 }, $pull: { paymentHistory: { monthNum } }, $set: { isLaborFree: false } },
+      { new: true }
+    );
+    if (!updated) bad(409, 'Passbook changed. Refresh and retry.');
+    res.json({ success: true, customer: publicCustomer(updated) });
+  }));
+
+  // ============================================================
+  // ADMIN PAYMENT REVIEW — MONGODB ATLAS TRANSACTION
+  // ============================================================
+  app.get('/api/admin/payment-requests', adminAuth, wrap(async (req, res) => {
+    const status = clean(req.query.status);
+    if (status && !['Pending', 'Approved', 'Rejected'].includes(status)) bad(400, 'Invalid status.');
+    const requests = await PaymentRequest.find(status ? { status } : {})
+      .populate('customer', 'customerId name phone paidMonths customInstallment isActive schemeJoined')
+      .sort({ createdAt: -1 }).lean();
+    res.json({ success: true, requests, paymentRequests: requests });
+  }));
+  app.get('/api/admin/pending-payments', adminAuth, wrap(async (_req, res) => {
+    const requests = await PaymentRequest.find({ status: 'Pending' })
+      .populate('customer', 'customerId name phone paidMonths customInstallment')
+      .sort({ createdAt: -1 }).lean();
+    res.json({ success: true, requests, paymentRequests: requests });
+  }));
+  async function reviewPayment(req, res, action) {
+    const id = req.params.id || req.body.paymentRequestId || req.body.requestId || req.body.id;
+    if (!validId(id)) bad(400, 'Valid payment request ID required.');
+    if (action === 'Rejected') {
+      const paymentRequest = await PaymentRequest.findOneAndUpdate(
+        { _id: id, status: 'Pending' },
+        { $set: { status: 'Rejected', rejectionReason: safe(req.body.reason ?? req.body.rejectionReason, 300),
+          reviewedAt: new Date(), reviewedBy: ADMIN_EMAIL } }, { new: true }
+      );
+      if (!paymentRequest) bad(409, 'Payment request already reviewed.');
+      return res.json({ success: true, status: 'Rejected', paymentRequest });
+    }
+    const session = await mongoose.startSession();
+    let paymentRequest, customer;
+    try {
+      await session.withTransaction(async () => {
+        const request = await PaymentRequest.findOne({ _id: id, status: 'Pending' }).session(session);
+        if (!request) bad(409, 'Payment request already reviewed.');
+        const c = await User.findById(request.customer).session(session);
+        if (!c || c.isActive === false || !c.schemeJoined) bad(409, 'Customer not eligible.');
+        if (Number(c.paidMonths || 0) + 1 !== request.monthNum) bad(409, 'Not the next unpaid installment.');
+        if (Number(c.customInstallment) !== request.amount) bad(409, 'Installment amount mismatch.');
+        if (await User.exists({ 'paymentHistory.transactionId': request.transactionId }).session(session))
+          bad(409, 'UTR already verified.');
+        const now = new Date();
+        customer = await User.findOneAndUpdate(
+          { _id: c._id, schemeJoined: true, isActive: { $ne: false }, paidMonths: request.monthNum - 1 },
+          { $inc: { paidMonths: 1 }, $push: { paymentHistory: {
+            monthNum: request.monthNum, amount: request.amount,
+            transactionId: request.transactionId, paidAt: request.createdAt,
+            verifiedAt: now, method: 'UPI'
+          } }, $set: { isLaborFree: false } }, { new: true, session }
+        );
+        if (!customer) bad(409, 'Passbook changed. Refresh and retry.');
+        paymentRequest = await PaymentRequest.findOneAndUpdate(
+          { _id: id, status: 'Pending' },
+          { $set: { status: 'Approved', reviewedAt: now, reviewedBy: ADMIN_EMAIL } },
+          { new: true, session }
+        );
+        if (!paymentRequest) bad(409, 'Payment request already reviewed.');
+      });
+    } finally { await session.endSession(); }
+    res.json({ success: true, verified: true, status: 'Approved',
+      paymentRequest, customer: publicCustomer(customer) });
   }
-});
+  for (const method of ['post', 'put']) {
+    app[method]('/api/admin/payment-requests/:id/approve', adminAuth,
+      wrap((req, res) => reviewPayment(req, res, 'Approved')));
+    app[method]('/api/admin/payment-requests/:id/reject', adminAuth,
+      wrap((req, res) => reviewPayment(req, res, 'Rejected')));
+  }
+  app.post('/api/admin/approve-payment', adminAuth, wrap((req, res) => reviewPayment(req, res, 'Approved')));
+  app.post('/api/admin/reject-payment', adminAuth, wrap((req, res) => reviewPayment(req, res, 'Rejected')));
+  app.post('/api/admin/verify-payment', adminAuth, wrap((req, res) =>
+    reviewPayment(req, res, clean(req.body.action).toLowerCase() === 'reject' ? 'Rejected' : 'Approved')));
 
-app.put('/api/store/settings', async (req, res) => {
-  try {
-    const { upiId, merchantName, qrCodeUrl } = req.body;
-    const updateData = {};
-    if (upiId) updateData.upiId = upiId.trim();
-    if (merchantName) updateData.merchantName = merchantName.trim();
-    if (qrCodeUrl !== undefined) updateData.qrCodeUrl = qrCodeUrl;
+  // Preview only: final making-charge waiver requires next calendar month after installment 12.
+  app.post('/api/customer/redeem-scheme', customerAuth, wrap(async (req, res) => {
+    if (req.body.userId && String(req.body.userId) !== String(req.customer._id)) bad(403, 'Not your scheme.');
+    const standardMakingCharges = Number(req.body.standardMakingCharges || 0);
+    if (!Number.isFinite(standardMakingCharges) || standardMakingCharges < 0)
+      bad(400, 'Invalid making charges.');
+    const eligible = discountEligible(req.customer);
+    const totalAccumulatedSavings = req.customer.paymentHistory.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    res.json({
+      success: true, message: eligible ? 'Eligible subject to store verification and scheme terms.' : 'Not yet eligible.',
+      redemptionDetails: {
+        customerId: req.customer.customerId, customerName: req.customer.name,
+        totalAccumulatedSavings, standardMakingCharges,
+        makingChargesDiscountPercentage: eligible ? 100 : 0,
+        finalMakingChargesToPay: eligible ? 0 : standardMakingCharges,
+        eligible, goldOnly: true, previewOnly: true
+      }
+    });
+  }));
 
+  // ============================================================
+  // STORE UPI SETTINGS & WHATSAPP REMINDERS
+  // ============================================================
+  app.get('/api/store/settings', wrap(async (_req, res) => {
+    const settings = await StoreSettings.findByIdAndUpdate(
+      'store_config', { $setOnInsert: { merchantName: 'Rahul Jewellers' } },
+      { upsert: true, new: true }
+    );
+    res.json({ success: true, settings });
+  }));
+  app.put('/api/store/settings', adminAuth, wrap(async (req, res) => {
+    const upiId = clean(req.body.upiId), merchantName = safe(req.body.merchantName, 100);
+    if (!upiId || !merchantName || !/^[\w.\-]+@[\w.\-]+$/.test(upiId))
+      bad(400, 'Valid UPI ID and merchant name required.');
+    const qrCodeUrl = req.body.qrCodeUrl;
+    if (qrCodeUrl !== undefined && qrCodeUrl &&
+      !/^(data:image\/(?:png|jpeg|webp);base64,|https:\/\/)/i.test(qrCodeUrl))
+      bad(400, 'Invalid QR image.');
     const settings = await StoreSettings.findByIdAndUpdate(
       'store_config',
-      updateData,
-      { new: true, upsert: true }
+      { $set: { upiId, merchantName, ...(qrCodeUrl !== undefined ? { qrCodeUrl } : {}) } },
+      { upsert: true, new: true }
     );
     res.json({ success: true, settings });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+  }));
+  app.post('/api/admin/send-whatsapp-reminder', adminAuth, wrap(async (req, res) => {
+    const c = await User.findOne({ customerId: clean(req.body.customerId) });
+    if (!c || !c.schemeJoined) bad(404, 'Gold Scheme subscriber not found.');
+    if (Number(c.paidMonths || 0) >= 12) bad(409, 'All installments completed.');
+    const month = Number(c.paidMonths || 0) + 1;
+    const message = `नमस्ते ${c.name} जी,\n\nRahul Jewellers Shivganj Gold Savings Scheme रिमाइंडर।\nCustomer ID: ${c.customerId}\nकिस्त: ${month}/12\nराशि: ₹${Number(c.customInstallment).toLocaleString('en-IN')}\n\n12 किस्तें पूरी करने के अगले महीने Gold Jewellery के Labour/Making Charges पर नियमानुसार 100% छूट।\nधन्यवाद!`;
+    res.json({ success: true, url: `https://wa.me/91${c.phone}?text=${encodeURIComponent(message)}` });
+  }));
+
+  // ============================================================
+  // MANUAL ADMIN-PUBLISHED 22K GOLD RATE (NOT AN MCX LIVE FEED)
+  // ============================================================
+  const goldClients = new Set();
+  function goldPayload(rate) {
+    return {
+      success: true, type: 'gold', enabled: Boolean(rate?.enabled),
+      carat: '22K', priceInrPerGram: Number(rate?.priceInrPerGram || 0),
+      source: 'manual', connected: Boolean(rate?.enabled),
+      timestamp: rate?.updatedAt ? new Date(rate.updatedAt).getTime() : Date.now(),
+      goldLastUpdated: rate?.updatedAt ? new Date(rate.updatedAt).getTime() : null
+    };
   }
-});
-
-app.post('/api/admin/send-whatsapp-reminder', async (req, res) => {
-  try {
-    const { phone, name, customerId, nextMonth, amount } = req.body;
-    const message = `Namaste ${name} ji,\n\nReminder from *Rahul Jewellers (Sheoganj)* for your 12-Month Savings Scheme.\n\n• Customer ID: ${customerId}\n• Due: Installment Month #${nextMonth}\n• Installment Amount: ₹${Number(amount || 0).toLocaleString('en-IN')}\n\nThank you for saving with us!`;
-    res.json({ success: true, url: `https://wa.me/91${phone}?text=${encodeURIComponent(message)}` });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+  function broadcastGoldRate(rate) {
+    const message = `data: ${JSON.stringify(goldPayload(rate))}\n\n`;
+    for (const client of goldClients) {
+      try { client.write(message); } catch { goldClients.delete(client); }
+    }
   }
-});
+  app.get('/api/gold-rate', wrap(async (_req, res) => {
+    res.json(goldPayload(await GoldRate.findById('published_gold_rate').lean()));
+  }));
+  app.put('/api/admin/gold-rate', adminAuth, wrap(async (req, res) => {
+    if (typeof req.body.enabled !== 'boolean') bad(400, 'enabled must be true or false.');
+    const price = Number(req.body.priceInrPerGram);
+    if (!Number.isFinite(price) || price < 0 || (req.body.enabled && price <= 0))
+      bad(400, 'Enter a valid rate in INR per gram.');
+    const goldRate = await GoldRate.findByIdAndUpdate(
+      'published_gold_rate',
+      { $set: { enabled: req.body.enabled, priceInrPerGram: price, carat: '22K', updatedBy: ADMIN_EMAIL } },
+      { new: true, upsert: true, runValidators: true }
+    );
+    broadcastGoldRate(goldRate);
+    res.json({ success: true, goldRate, rate: goldRate });
+  }));
+  app.get('/api/gold-rate/stream', wrap(async (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    goldClients.add(res);
+    const rate = await GoldRate.findById('published_gold_rate').lean();
+    res.write(`data: ${JSON.stringify(goldPayload(rate))}\n\n`);
+    const heartbeat = setInterval(() => {
+      try { res.write(': heartbeat\n\n'); } catch {}
+    }, 15000);
+    req.on('close', () => { clearInterval(heartbeat); goldClients.delete(res); });
+  }));
 
-app.post('/api/support/chat', async (req, res) => {
-  try {
-    const { message } = req.body;
-    const systemInstruction = `
-      You are an AI customer support assistant for "Rahul Jewellers" located in Main Market, Sheoganj, Rajasthan. 
-      Your job is to assist customers with:
-      - The 12-Month Savings Scheme (12 monthly installments paid fully, granting a 100% discount on making charges upon redemption).
-      - Showroom details, timings (10:00 AM to 6:00 PM), and pure 916 hallmarked gold/silver collections.
-      - Helpline numbers: +91 9950091024 / +91 9461452322.
-      - Instruct them to send payment screenshots on WhatsApp for manual passbook verification if they ask about online scheme payments.
-      Be polite, welcoming, and concise.
-    `;
-
+  // ============================================================
+  // AI SUPPORT CHAT (OPTIONAL)
+  // ============================================================
+  app.post('/api/support/chat', wrap(async (req, res) => {
+    const message = safe(req.body.message, 1500);
+    if (!message) bad(400, 'Message required.');
+    if (!ai) bad(503, 'Support chat is temporarily unavailable.');
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
       contents: message,
       config: {
-        systemInstruction: systemInstruction,
+        systemInstruction: `You are the Hindi-first assistant for Rahul Jewellers Shivganj, Rajasthan. The showroom sells Gold and Silver jewellery. The 12+1 savings scheme is GOLD ONLY. Customers pay 12 monthly installments, and in the following month eligible customers get 100% off labour/making charges on gold jewellery, subject to terms. There is NO free 13th installment, free extra gold, or silver savings scheme. UPI installment submissions remain Pending until admin verifies. Never claim a manually entered gold rate is a live market rate.`
       }
     });
+    res.json({ success: true, reply: response.text || 'Please contact Rahul Jewellers Shivganj.' });
+  }));
 
-    res.json({ success: true, reply: response.text });
-  } catch (err) {
-    console.error("Support Chat Error:", err);
-    res.status(500).json({ success: false, message: 'Support chat unavailable right now.' });
-  }
-});
+  // Legacy /api/schemes endpoints are intentionally disabled: the original
+  // Scheme.js exported an Express router instead of a Mongoose model, and
+  // its payment endpoint could advance due dates without UPI verification.
+  app.use('/api/schemes', (_req, res) => res.status(410).json({
+    success: false, message: 'Legacy scheme routes disabled. Use verified customer/admin payment APIs.'
+  }));
 
-// ==========================================
-// LIVE 22K GOLD RATE API ENDPOINT
-// ==========================================
-app.get('/api/gold-rate', (req, res) => {
-  const priceInrPerGram = calculate22KGoldPriceINR();
-
-  if (!Number.isFinite(priceInrPerGram)) {
-    return res.status(503).json({
-      success: false,
-      message: 'Live 22K gold feed is not ready yet.',
-      connected: apiConnected
-    });
-  }
-
-  res.json({
-    success: true,
-    carat: '22K',
-    priceInrPerGram,
-    goldLastUpdated,
-    connected: apiConnected
+  app.use((err, _req, res, _next) => {
+    if (err instanceof mongoose.Error.ValidationError)
+      return res.status(400).json({ success: false, message: err.message });
+    if (err?.code === 11000)
+      return res.status(409).json({ success: false,
+        message: 'Duplicate mobile, Customer ID, UTR or pending installment.' });
+    if (err?.status) return res.status(err.status).json({ success: false, message: err.message });
+    console.error('Backend error:', err);
+    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   });
-});
 
-// ==========================================
-// LIVE 22K GOLD RATE SSE STREAM ENDPOINT
-// ==========================================
-app.get('/api/gold-rate/stream', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-
-  if (typeof res.flushHeaders === 'function') {
-    res.flushHeaders();
-  }
-
-  goldClients.add(res);
-
-  res.write(
-    `data: ${JSON.stringify({
-      type: 'status',
-      connected: apiConnected
-    })}\n\n`
-  );
-
-  const currentPrice = calculate22KGoldPriceINR();
-  if (Number.isFinite(currentPrice)) {
-    res.write(
-      `data: ${JSON.stringify({
-        type: 'gold',
-        carat: '22K',
-        priceInrPerGram: currentPrice,
-        timestamp: Date.now(),
-        connected: apiConnected
-      })}\n\n`
+  mongoose.connect(MONGO_URI).then(async () => {
+    // Existing old passbook accounts have a startDate even when paidMonths is zero.
+    // New independent customer accounts use startDate='', so they remain unjoined.
+    await User.updateMany(
+      { schemeJoined: { $exists: false },
+        $or: [{ paidMonths: { $gt: 0 } }, { startDate: { $type: 'string', $ne: '' } }] },
+      { $set: { schemeJoined: true } }
     );
-  }
-
-  const heartbeat = setInterval(() => {
-    try {
-      res.write(': heartbeat\n\n');
-    } catch {}
-  }, 15000);
-
-  req.on('close', () => {
-    clearInterval(heartbeat);
-    goldClients.delete(res);
+    await Promise.all([User.init(), PaymentRequest.init()]);
+    app.listen(PORT, '0.0.0.0', () => console.log(`Rahul Jewellers backend listening on ${PORT}`));
+  }).catch(err => {
+    console.error('MongoDB startup error:', err);
+    process.exitCode = 1;
   });
-});
-
-// ==========================================
-// START SERVER
-// ==========================================
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Rahul Jewellers Backend running on port ${PORT}`);
-  fetchLiveGoldFeed();
-});
