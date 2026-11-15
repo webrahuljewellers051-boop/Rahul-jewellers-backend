@@ -194,3 +194,62 @@ test(
     );
   }
 );
+
+
+test('Option A: join 15 Nov 2026, 12 installments through Oct 2027', () => {
+  const c = customer({
+    schemeScheduleVersion: 3,
+    schemeFirstDueMonth: '2026-11'
+  });
+
+  assert.equal(scheme.dueDateFor(c, 1), '2026-11-15');
+  assert.equal(scheme.dueDateFor(c, 2), '2026-12-15');
+  assert.equal(scheme.dueDateFor(c, 12), '2027-10-15');
+  assert.equal(scheme.schemeBenefitDate(c), '2027-11-15');
+  assert.equal(scheme.installmentRows(c, '2026-11-19')[0].status, 'PAYMENT_DUE');
+  assert.equal(scheme.installmentRows(c, '2026-11-20')[0].status, 'OVERDUE');
+});
+
+test('Option A ignores incorrect next-month firstDueMonth on V3', () => {
+  const c = customer({
+    schemeScheduleVersion: 3,
+    schemeFirstDueMonth: '2026-12'
+  });
+
+  assert.equal(scheme.dueDateFor(c, 1), '2026-11-15');
+  assert.equal(scheme.dueDateFor(c, 12), '2027-10-15');
+  assert.equal(scheme.deadline(c, '2026-11-15').firstDueMonth, '2026-11');
+});
+
+test('Legacy V1/V2 explicit due-month records remain unchanged', () => {
+  const c = customer({
+    schemeScheduleVersion: 2,
+    schemeFirstDueMonth: '2026-12'
+  });
+
+  assert.equal(scheme.dueDateFor(c, 1), '2026-12-15');
+  assert.equal(scheme.dueDateFor(c, 12), '2027-11-15');
+});
+
+test('Option A: early verified payments do not accelerate month 13', () => {
+  const c = customer({ schemeScheduleVersion: 3 });
+
+  c.installmentState.forEach(row => { row.paid = true; });
+
+  assert.equal(scheme.eligible(c, '2027-11-14'), false);
+  assert.equal(scheme.eligible(c, '2027-11-15'), true);
+});
+
+test('Option A: month-end clamp and restore anchor day', () => {
+  const c = customer({
+    schemeScheduleVersion: 3,
+    startDate: '2027-01-31',
+    schemeFirstDueMonth: '2027-01',
+    schemeAnchorDay: 31
+  });
+
+  assert.equal(scheme.dueDateFor(c, 1), '2027-01-31');
+  assert.equal(scheme.dueDateFor(c, 2), '2027-02-28');
+  assert.equal(scheme.dueDateFor(c, 3), '2027-03-31');
+  assert.equal(scheme.schemeBenefitDate(c), '2028-01-31');
+});

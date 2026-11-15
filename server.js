@@ -1,5 +1,5 @@
 
-// Rahul Jewellers Shivganj — complete backend server.js
+// Rahul Jewellers Sheoganj — complete backend server.js
 // RJ_BACKEND_UPDATE_V3
 // Required .env: MONGO_URI, JWT_SECRET, ADMIN_EMAIL, RESEND_API_KEY, RESEND_FROM,
 // CORS_ORIGINS (comma-separated customer/admin website origins).
@@ -520,6 +520,14 @@ function publicCustomer(c) {
   obj.totalPaidAmount = obj.paidMonths * Number(obj.customInstallment || 0);
   obj.remainingAmount = obj.totalSchemeAmount - obj.totalPaidAmount;
   obj.schemeBenefitDate = scheme.schemeBenefitDate(obj);
+  obj.schemeSchedule = obj.schemeJoined ? {
+    option: Number(obj.schemeScheduleVersion || 1) >= scheme.OPTION_A_SCHEDULE_VERSION
+      ? 'A' : 'Legacy',
+    firstInstallmentDate: scheme.dueDateFor(obj, 1),
+    twelfthInstallmentDate: scheme.dueDateFor(obj, 12),
+    benefitDate: obj.schemeBenefitDate,
+    paymentWindowDays: scheme.PAYMENT_WINDOW_DAYS
+  } : null;
   obj.eligibleForMakingChargeDiscount = discountEligible(obj);
   obj.isLaborFree = obj.eligibleForMakingChargeDiscount;
   obj.benefitStatus = obj.eligibleForMakingChargeDiscount
@@ -1367,12 +1375,12 @@ async function createCustomer({
     schemeFirstDueMonth: schemeJoined ? joinedDate.slice(0, 7) : '',
     schemeAnchorDay: schemeJoined
       ? Number(joinedDate.slice(8, 10)) : 0,
-    schemeScheduleVersion: 2,
+    schemeScheduleVersion: scheme.OPTION_A_SCHEDULE_VERSION,
     schemeTermsAcceptedAt:
       schemeJoined && schemeConsentConfirmed ? new Date() : undefined,
     schemeTermsVersion:
       schemeJoined && schemeConsentConfirmed
-        ? 'rolling-5-day-multipay-v2' : '',
+        ? 'join-day-first-installment-option-a-v3' : '',
     schemeCycle: 1,
     paidMonths: 0,
     installmentState: scheme.states({
@@ -1566,9 +1574,9 @@ app.post('/api/customer/join-scheme', customerAuth, wrap(async (req, res) => {
         schemeCycle: nextCycle,
         schemeFirstDueMonth: joinedDate.slice(0, 7),
         schemeAnchorDay: Number(joinedDate.slice(8, 10)),
-        schemeScheduleVersion: 2,
+        schemeScheduleVersion: scheme.OPTION_A_SCHEDULE_VERSION,
         schemeTermsAcceptedAt: new Date(),
-        schemeTermsVersion: 'rolling-5-day-multipay-v2',
+        schemeTermsVersion: 'join-day-first-installment-option-a-v3',
         schemeSuspendedAt: null,
         schemeSuspendedDueMonth: '',
         schemeSuspendedDueDate: '',
@@ -2527,7 +2535,9 @@ app.get(
 
     res.json({
       success: true,
-      claim: claim || null
+      claim: claim || null,
+      canDownloadBenefitCard: scheme.eligible(req.customer) &&
+        ['Pending', 'Verified'].includes(claim?.status)
     });
   })
 );
@@ -2632,6 +2642,8 @@ app.post(
     res.json({
       success: true,
       claim,
+      canDownloadBenefitCard: scheme.eligible(customer) &&
+        ['Pending', 'Verified'].includes(claim?.status),
       message:
         'Benefit claim recorded. Present the digital card at the showroom for verification.'
     });
@@ -3621,7 +3633,7 @@ app.post('/api/support/chat', chatLimiter, wrap(async (req, res) => {
     contents: message,
     config: {
       systemInstruction:
-        `You are the Hindi-first assistant for Rahul Jewellers Shivganj, Rajasthan. Contact numbers: 9950091024 and 9461452322. ` +
+        `You are the Hindi-first assistant for Rahul Jewellers Sheoganj, Rajasthan. Contact numbers: 9950091024 and 9461452322. ` +
         `The showroom sells Gold and Silver jewellery. ` +
         `The 12+1 savings scheme is GOLD ONLY. ` +
         `Customers pay 12 monthly installments, and in the following month eligible ` +

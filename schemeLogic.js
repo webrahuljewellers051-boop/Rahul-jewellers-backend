@@ -1,6 +1,6 @@
 
 /**
- * Rahul Jewellers Shivganj
+ * Rahul Jewellers Sheoganj
  * Gold Scheme — 12 monthly installments + making-charge benefit
  *
  * Complete replacement: jewel-backend/schemeLogic.js
@@ -23,6 +23,8 @@
 export const SCHEME_MONTHS = 12;
 export const IST_ZONE = 'Asia/Kolkata';
 export const PAYMENT_WINDOW_DAYS = 5;
+// Option A: the joining date is installment #1; month 13 is the benefit date.
+export const OPTION_A_SCHEDULE_VERSION = 3;
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const YEAR_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -458,14 +460,16 @@ export function dueDateFor(
     );
   }
 
+  const joiningMonth = normalizedMonth(
+    String(customer?.startDate || '').slice(0, 7)
+  );
+
+  // V3/Option A must ALWAYS start in the joining month.
+  // Preserve legacy V1/V2 due-month records without migration.
   const firstDueMonth =
-    normalizedMonth(
-      customer?.schemeFirstDueMonth
-    ) ||
-    normalizedMonth(
-      String(customer?.startDate || '')
-        .slice(0, 7)
-    );
+    Number(customer?.schemeScheduleVersion || 1) >= OPTION_A_SCHEDULE_VERSION
+      ? joiningMonth
+      : (normalizedMonth(customer?.schemeFirstDueMonth) || joiningMonth);
 
   if (!firstDueMonth) {
     return null;
@@ -696,8 +700,9 @@ export function deadline(
     schemeStartDate:
       customer?.startDate || null,
 
-    firstDueMonth:
-      customer?.schemeFirstDueMonth || null,
+    firstDueMonth: customer?.schemeJoined
+      ? dueDateFor(customer, 1)?.slice(0, 7) || null
+      : null,
 
     anchorDay: anchorDay(customer),
 
