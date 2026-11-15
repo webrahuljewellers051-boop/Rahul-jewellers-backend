@@ -1,5 +1,6 @@
 
-// Rahul Jewellers Sheoganj — complete backend server.js
+// Rahul Jewellers Shivganj — complete backend server.js
+// RJ_BACKEND_UPDATE_V3
 // Required .env: MONGO_URI, JWT_SECRET, ADMIN_EMAIL, RESEND_API_KEY, RESEND_FROM,
 // CORS_ORIGINS (comma-separated customer/admin website origins).
 // Optional: PORT, GEMINI_API_KEY, GEMINI_MODEL, SCHEME_DEADLINE_START_MONTH.
@@ -74,7 +75,7 @@ const validId = value => mongoose.isValidObjectId(value);
 const validPhone = value => /^[6-9]\d{9}$/.test(value);
 const normalizeEmail = value => clean(value).toLowerCase();
 const validEmail = value => value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value);
-const validAmount = value => Number.isFinite(value) && value >= 1000 && value <= 1000000;
+const validAmount = value => Number.isInteger(value) && value >= 5000 && value <= 1000000;
 const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function istParts(date, fields) {
@@ -167,12 +168,34 @@ async function verifyPassword(password, stored) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const StoreSettings = mongoose.models.StoreSettings || mongoose.model('StoreSettings', new mongoose.Schema({
-  _id: { type: String, default: 'store_config' },
-  upiId: { type: String, default: '' },
-  merchantName: { type: String, default: 'Rahul Jewellers' },
-  qrCodeUrl: { type: String, default: '' }
-}, { timestamps: true }));
+const StoreSettings = mongoose.models.StoreSettings ||
+  mongoose.model('StoreSettings', new mongoose.Schema({
+    _id: {
+      type: String,
+      default: 'store_config'
+    },
+    upiId: {
+      type: String,
+      default: ''
+    },
+    merchantName: {
+      type: String,
+      default: 'Rahul Jewellers'
+    },
+    qrCodeUrl: {
+      type: String,
+      default: ''
+    },
+    contactNumbers: {
+      type: [String],
+      default: [
+        '9950091024',
+        '9461452322'
+      ]
+    }
+  }, {
+    timestamps: true
+  }));
 
 const paymentHistorySchema = new mongoose.Schema({
   monthNum: { type: Number, required: true, min: 1, max: 12 },
@@ -260,14 +283,92 @@ const Category = mongoose.models.Category || mongoose.model('Category', new mong
   parentCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }
 }, { timestamps: true }));
 
-const Product = mongoose.models.Product || mongoose.model('Product', new mongoose.Schema({
-  title: { type: String, required: true },
-  category: { type: String, required: true },
-  categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
-  weight: { type: String, required: true },
-  price: { type: Number, default: 0 },
-  imageUrl: { type: String, required: true }
-}, { timestamps: true }));
+const productSchema = new mongoose.Schema({
+  title: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  slug: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
+  sku: {
+    type: String,
+    default: ''
+  },
+  category: {
+    type: String,
+    required: true
+  },
+  categoryId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Category',
+    default: null
+  },
+  metal: {
+    type: String,
+    default: ''
+  },
+  purity: {
+    type: String,
+    default: ''
+  },
+  weight: {
+    type: String,
+    required: true
+  },
+  netWeight: {
+    type: String,
+    default: ''
+  },
+  grossWeight: {
+    type: String,
+    default: ''
+  },
+  stone: {
+    type: String,
+    default: ''
+  },
+  design: {
+    type: String,
+    default: ''
+  },
+  craftsmanship: {
+    type: String,
+    default: ''
+  },
+  description: {
+    type: String,
+    default: ''
+  },
+  price: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  imageUrl: {
+    type: String,
+    required: true
+  },
+  images: [{
+    url: {
+      type: String,
+      required: true
+    },
+    alt: {
+      type: String,
+      default: ''
+    }
+  }]
+}, {
+  timestamps: true
+});
+
+const Product = mongoose.models.Product ||
+  mongoose.model('Product', productSchema);
 
 const paymentRequestSchema = new mongoose.Schema({
   customer: {
@@ -318,6 +419,82 @@ const AdminAudit = mongoose.models.AdminAudit || mongoose.model('AdminAudit', ne
   details: mongoose.Schema.Types.Mixed
 }, { timestamps: true }));
 
+
+const benefitClaimSchema = new mongoose.Schema({
+  customer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    index: true
+  },
+  customerId: {
+    type: String,
+    required: true
+  },
+  schemeCycle: {
+    type: Number,
+    required: true
+  },
+  claimId: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  status: {
+    type: String,
+    enum: [
+      'Pending',
+      'Verified',
+      'Redeemed',
+      'Revoked'
+    ],
+    default: 'Pending'
+  },
+  originalStartDate: String,
+  benefitDate: String,
+  totalPaid: Number,
+  verifiedInstallments: Number,
+  verifiedAt: Date,
+  verifiedBy: String,
+  redeemedAt: Date,
+  redeemedBy: String,
+  redeemedProduct: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product'
+  },
+  makingCharges: {
+    type: Number,
+    default: 0
+  },
+  discountAmount: {
+    type: Number,
+    default: 0
+  },
+  adminReason: {
+    type: String,
+    default: ''
+  },
+  needsReview: {
+    type: Boolean,
+    default: false
+  }
+}, {
+  timestamps: true
+});
+
+benefitClaimSchema.index(
+  {
+    customer: 1,
+    schemeCycle: 1
+  },
+  {
+    unique: true
+  }
+);
+
+const BenefitClaim = mongoose.models.BenefitClaim ||
+  mongoose.model('BenefitClaim', benefitClaimSchema);
+
 const GoldRate = mongoose.models.GoldRate || mongoose.model('GoldRate', new mongoose.Schema({
   _id: { type: String, default: 'published_gold_rate' },
   enabled: { type: Boolean, default: false },
@@ -353,6 +530,57 @@ function publicCustomer(c) {
     .filter(p => scheme.paymentCycle(p) !== schemeCycle(obj));
   obj.paymentHistory = sameCycleHistory(obj);
   return obj;
+}
+
+
+async function reconcileBenefitClaims(
+  customer,
+  reason = 'Scheme eligibility changed'
+) {
+  if (!customer) return;
+
+  if (scheme.eligible(customer)) {
+    return;
+  }
+
+  const activeClaims = await BenefitClaim.find({
+    customer: customer._id,
+    schemeCycle: schemeCycle(customer),
+    status: {
+      $in: ['Pending', 'Verified']
+    }
+  });
+
+  for (const claim of activeClaims) {
+    claim.status = 'Revoked';
+    claim.adminReason = reason;
+    claim.needsReview = false;
+    await claim.save();
+
+    await AdminAudit.create({
+      action: 'BENEFIT_CLAIM_REVOKED',
+      customerRef: customer._id,
+      customerId: customer.customerId,
+      reason,
+      details: {
+        claimId: claim.claimId,
+        cycle: schemeCycle(customer)
+      }
+    });
+  }
+
+  // A redeemed claim must retain its redemption
+  // history, even if an installment is reversed.
+  await BenefitClaim.updateMany({
+    customer: customer._id,
+    schemeCycle: schemeCycle(customer),
+    status: 'Redeemed'
+  }, {
+    $set: {
+      needsReview: true,
+      adminReason: reason
+    }
+  });
 }
 
 // Pending UPI submitted on time protects selected installments.
@@ -402,6 +630,11 @@ async function ensureSchemeFresh(customer) {
   }, { new: true });
 
   if (updated) {
+    await reconcileBenefitClaims(
+      updated,
+      'Scheme automatically cancelled after missed deadline'
+    );
+
     await AdminAudit.create({
       action: 'SCHEME_AUTO_CANCEL',
       customerRef: updated._id,
@@ -578,71 +811,542 @@ app.post('/api/client/admin-logout', (_req, res) => {
   res.json({ success: true });
 });
 
-// SHOWROOM PRODUCTS
-app.get('/api/products', wrap(async (_req, res) => {
+// SHOWROOM PRODUCTS AND NESTED CATEGORIES
+
+function validJewelleryImage(value) {
+  return /^(https:\/\/|data:image\/(?:png|jpeg|webp|gif);base64,)/i
+    .test(String(value || ''));
+}
+
+function jewellerySlug(title) {
+  const base = String(title || 'jewellery')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 65) || 'jewellery';
+
+  return base + '-' + randomBytes(4).toString('hex');
+}
+
+function normalizeImages(body, existing = []) {
+  if (
+    body.images === undefined &&
+    body.imageUrl === undefined
+  ) {
+    return existing;
+  }
+
+  let images = body.images;
+
+  if (!Array.isArray(images)) {
+    images = body.imageUrl
+      ? [body.imageUrl]
+      : existing;
+  }
+
+  if (images.length > 12) {
+    bad(400, 'Maximum 12 product images are allowed.');
+  }
+
+  return images.map((image, index) => {
+    const url = typeof image === 'string'
+      ? image
+      : image?.url;
+
+    const alt = typeof image === 'string'
+      ? ''
+      : image?.alt;
+
+    if (!validJewelleryImage(url)) {
+      bad(
+        400,
+        'Invalid image URL at position ' + (index + 1)
+      );
+    }
+
+    return {
+      url: String(url),
+      alt: safe(alt, 150)
+    };
+  });
+}
+
+async function getRootCategory(categoryId) {
+  if (!categoryId) return null;
+
+  let current = await Category.findById(
+    categoryId
+  ).lean();
+
+  if (!current) {
+    bad(404, 'Selected jewellery folder not found.');
+  }
+
+  const visited = new Set();
+
+  while (current.parentCategory) {
+    const id = String(current._id);
+
+    if (visited.has(id)) {
+      bad(409, 'Category hierarchy contains a cycle.');
+    }
+
+    visited.add(id);
+
+    current = await Category.findById(
+      current.parentCategory
+    ).lean();
+
+    if (!current) {
+      bad(409, 'Category parent is missing.');
+    }
+  }
+
+  return current;
+}
+
+async function categoryTreeIds(rootId) {
+  const all = await Category.find()
+    .select('_id parentCategory')
+    .lean();
+
+  const result = new Set([String(rootId)]);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (const item of all) {
+      const parent = String(
+        item.parentCategory || ''
+      );
+
+      const id = String(item._id);
+
+      if (result.has(parent) && !result.has(id)) {
+        result.add(id);
+        changed = true;
+      }
+    }
+  }
+
+  return [...result];
+}
+
+function productFields(body, current = null) {
+  const fields = {};
+
+  const textFields = [
+    'title',
+    'sku',
+    'metal',
+    'purity',
+    'weight',
+    'netWeight',
+    'grossWeight',
+    'stone',
+    'design',
+    'craftsmanship',
+    'description'
+  ];
+
+  for (const field of textFields) {
+    if (body[field] === undefined) continue;
+
+    fields[field] = safe(
+      body[field],
+      field === 'description' ? 4000 : 300
+    );
+  }
+
+  if (body.category !== undefined) {
+    fields.category = safe(body.category, 100);
+  }
+
+  if (body.price !== undefined) {
+    const price = Number(body.price || 0);
+
+    if (!Number.isFinite(price) || price < 0) {
+      bad(400, 'Invalid product price.');
+    }
+
+    fields.price = price;
+  }
+
+  if (body.images !== undefined ||
+      body.imageUrl !== undefined) {
+    const images = normalizeImages(
+      body,
+      current?.images || []
+    );
+
+    fields.images = images;
+
+    if (images.length) {
+      fields.imageUrl = images[0].url;
+    } else if (body.imageUrl) {
+      fields.imageUrl = String(body.imageUrl);
+    }
+  }
+
+  return fields;
+}
+
+app.get('/api/products', wrap(async (req, res) => {
+  const query = {};
+
+  if (req.query.category) {
+    query.category = safe(req.query.category, 100);
+  }
+
+  const products = await Product.find(query)
+    .sort({ createdAt: -1 })
+    .lean();
+
   res.json({
     success: true,
-    products: await Product.find().sort({ createdAt: -1 }).lean()
+    products
   });
 }));
-app.post('/api/admin/products', adminAuth, wrap(async (req, res) => {
-  const title = safe(req.body.title, 150);
-  const category = safe(req.body.category, 60);
-  const weight = safe(req.body.weight, 80);
-  const imageUrl = clean(req.body.imageUrl);
-  const price = req.body.price == null || req.body.price === ''
-    ? 0 : Number(req.body.price);
-  if (!title || !category || !weight)
-    bad(400, 'Product name, category and weight are required.');
-  if (!Number.isFinite(price) || price < 0)
-    bad(400, 'Invalid price.');
-  if (!/^(data:image\/(?:png|jpeg|webp|gif);base64,|https:\/\/)/i.test(imageUrl))
-    bad(400, 'Valid image is required.');
-  const categoryId = validId(req.body.categoryId)
-    ? req.body.categoryId : null;
-  const product = await Product.create({
-    title, category, weight, imageUrl, price, categoryId
-  });
-  res.status(201).json({ success: true, product });
-}));
-app.delete('/api/admin/products/:id', adminAuth, wrap(async (req, res) => {
-  if (!validId(req.params.id)) bad(400, 'Invalid product ID.');
-  if (!await Product.findByIdAndDelete(req.params.id))
+
+app.get('/api/products/:slugOrId', wrap(async (req, res) => {
+  const key = clean(req.params.slugOrId);
+
+  const product = validId(key)
+    ? await Product.findById(key).lean()
+    : await Product.findOne({ slug: key }).lean();
+
+  if (!product) {
     bad(404, 'Product not found.');
-  res.json({ success: true, message: 'Product deleted.' });
-}));
-app.get('/api/categories', wrap(async (_req, res) => {
+  }
+
+  const similarProducts = await Product.find({
+    _id: { $ne: product._id },
+    category: product.category
+  })
+    .sort({ createdAt: -1 })
+    .limit(6)
+    .lean();
+
   res.json({
     success: true,
-    categories: await Category.find()
-      .populate('parentCategory')
-      .sort({ createdAt: -1 }).lean()
+    product,
+    similarProducts
   });
 }));
-app.post('/api/admin/categories', adminAuth, wrap(async (req, res) => {
-  const name = safe(req.body.name, 100);
-  if (!name) bad(400, 'Category name is required.');
-  const parentCategory = validId(req.body.parentCategory)
-    ? req.body.parentCategory : null;
-  if (parentCategory && !await Category.exists({ _id: parentCategory }))
-    bad(404, 'Parent category not found.');
-  const category = await Category.create({
-    name,
-    description: safe(req.body.description, 400),
-    parentCategory
+
+app.post(
+  '/api/admin/products',
+  adminAuth,
+  wrap(async (req, res) => {
+    const fields = productFields(req.body);
+
+    if (!fields.title || !fields.weight) {
+      bad(
+        400,
+        'Product name and weight are required.'
+      );
+    }
+
+    const categoryId = req.body.categoryId;
+
+    if (categoryId) {
+      if (!validId(categoryId)) {
+        bad(400, 'Invalid folder ID.');
+      }
+
+      const root = await getRootCategory(categoryId);
+
+      fields.category = root.name;
+      fields.categoryId = categoryId;
+    }
+
+    if (!fields.category) {
+      bad(400, 'Jewellery category is required.');
+    }
+
+    if (!fields.imageUrl) {
+      bad(400, 'At least one image is required.');
+    }
+
+    fields.slug = jewellerySlug(fields.title);
+
+    const product = await Product.create(fields);
+
+    res.status(201).json({
+      success: true,
+      product
+    });
+  })
+);
+
+app.put(
+  '/api/admin/products/:id',
+  adminAuth,
+  wrap(async (req, res) => {
+    if (!validId(req.params.id)) {
+      bad(400, 'Invalid product ID.');
+    }
+
+    const existing = await Product.findById(
+      req.params.id
+    );
+
+    if (!existing) {
+      bad(404, 'Product not found.');
+    }
+
+    const fields = productFields(
+      req.body,
+      existing
+    );
+
+    if (req.body.categoryId !== undefined) {
+      const categoryId = req.body.categoryId;
+
+      if (!categoryId) {
+        fields.categoryId = null;
+      } else {
+        if (!validId(categoryId)) {
+          bad(400, 'Invalid folder ID.');
+        }
+
+        const root = await getRootCategory(
+          categoryId
+        );
+
+        fields.categoryId = categoryId;
+        fields.category = root.name;
+      }
+    }
+
+    Object.assign(existing, fields);
+
+    if (
+      !existing.title ||
+      !existing.category ||
+      !existing.weight ||
+      !existing.imageUrl
+    ) {
+      bad(
+        400,
+        'Name, category, weight and image are required.'
+      );
+    }
+
+    await existing.save();
+
+    res.json({
+      success: true,
+      product: existing
+    });
+  })
+);
+
+app.delete(
+  '/api/admin/products/:id',
+  adminAuth,
+  wrap(async (req, res) => {
+    if (!validId(req.params.id)) {
+      bad(400, 'Invalid product ID.');
+    }
+
+    const product = await Product.findByIdAndDelete(
+      req.params.id
+    );
+
+    if (!product) {
+      bad(404, 'Product not found.');
+    }
+
+    res.json({
+      success: true,
+      message: 'Product deleted.'
+    });
+  })
+);
+
+app.get('/api/categories', wrap(async (_req, res) => {
+  const categories = await Category.find()
+    .populate('parentCategory')
+    .sort({ createdAt: -1 })
+    .lean();
+
+  res.json({
+    success: true,
+    categories
   });
-  res.status(201).json({ success: true, category });
 }));
-app.delete('/api/admin/categories/:id', adminAuth, wrap(async (req, res) => {
-  if (!validId(req.params.id)) bad(400, 'Invalid category ID.');
-  if (await Product.exists({ categoryId: req.params.id }))
-    bad(409, 'Move products out of this category first.');
-  if (await Category.exists({ parentCategory: req.params.id }))
-    bad(409, 'Delete subcategories first.');
-  if (!await Category.findByIdAndDelete(req.params.id))
-    bad(404, 'Category not found.');
-  res.json({ success: true, message: 'Category deleted.' });
-}));
+
+app.post(
+  '/api/admin/categories',
+  adminAuth,
+  wrap(async (req, res) => {
+    const name = safe(req.body.name, 100);
+
+    if (!name) {
+      bad(400, 'Category name is required.');
+    }
+
+    const parentId =
+      req.body.parentCategory || null;
+
+    if (parentId) {
+      if (!validId(parentId)) {
+        bad(400, 'Invalid parent category.');
+      }
+
+      if (!await Category.exists({
+        _id: parentId
+      })) {
+        bad(404, 'Parent category not found.');
+      }
+    }
+
+    const category = await Category.create({
+      name,
+      description: safe(
+        req.body.description,
+        400
+      ),
+      parentCategory: parentId
+    });
+
+    res.status(201).json({
+      success: true,
+      category
+    });
+  })
+);
+
+app.put(
+  '/api/admin/categories/:id',
+  adminAuth,
+  wrap(async (req, res) => {
+    const id = req.params.id;
+
+    if (!validId(id)) {
+      bad(400, 'Invalid category ID.');
+    }
+
+    const category = await Category.findById(id);
+
+    if (!category) {
+      bad(404, 'Category not found.');
+    }
+
+    if (req.body.name !== undefined) {
+      const name = safe(req.body.name, 100);
+
+      if (!name) {
+        bad(400, 'Category name cannot be empty.');
+      }
+
+      category.name = name;
+    }
+
+    if (req.body.description !== undefined) {
+      category.description = safe(
+        req.body.description,
+        400
+      );
+    }
+
+    if (req.body.parentCategory !== undefined) {
+      const parentId =
+        req.body.parentCategory || null;
+
+      if (parentId) {
+        if (!validId(parentId)) {
+          bad(400, 'Invalid parent category.');
+        }
+
+        const descendants = await categoryTreeIds(id);
+
+        if (descendants.includes(String(parentId))) {
+          bad(
+            409,
+            'Cannot move a folder inside itself or its subfolder.'
+          );
+        }
+
+        if (!await Category.exists({
+          _id: parentId
+        })) {
+          bad(404, 'Parent category not found.');
+        }
+      }
+
+      category.parentCategory = parentId;
+    }
+
+    await category.save();
+
+    const root = await getRootCategory(id);
+    const affectedIds = await categoryTreeIds(id);
+
+    await Product.updateMany(
+      {
+        categoryId: {
+          $in: affectedIds
+        }
+      },
+      {
+        $set: {
+          category: root.name
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      category,
+      affectedFolders: affectedIds.length
+    });
+  })
+);
+
+app.delete(
+  '/api/admin/categories/:id',
+  adminAuth,
+  wrap(async (req, res) => {
+    const id = req.params.id;
+
+    if (!validId(id)) {
+      bad(400, 'Invalid category ID.');
+    }
+
+    if (await Product.exists({
+      categoryId: id
+    })) {
+      bad(
+        409,
+        'Move products out of this folder first.'
+      );
+    }
+
+    if (await Category.exists({
+      parentCategory: id
+    })) {
+      bad(
+        409,
+        'Move or delete subfolders first.'
+      );
+    }
+
+    const deleted = await Category.findByIdAndDelete(id);
+
+    if (!deleted) {
+      bad(404, 'Category not found.');
+    }
+
+    res.json({
+      success: true,
+      message: 'Category deleted.'
+    });
+  })
+);
 
 // CUSTOMER REGISTRATION
 async function createCustomer({
@@ -832,7 +1536,7 @@ app.post('/api/customer/join-scheme', customerAuth, wrap(async (req, res) => {
     req.body.amount ?? req.body.customInstallment
   );
   if (!validAmount(amount))
-    bad(400, 'Monthly amount must be ₹1,000 to ₹10,00,000.');
+    bad(400, 'Monthly amount must be ₹5,000 to ₹10,00,000.');
   if (!validEmail(normalizeEmail(req.customer.email)))
     bad(400, 'Add a valid email to your profile before joining.');
   if (req.body.termsAccepted !== true)
@@ -1368,6 +2072,11 @@ app.post('/api/admin/manual-passbook-update', adminAuth, wrap(async (req, res) =
   }
 
   updated = await ensureSchemeFresh(updated);
+
+  await reconcileBenefitClaims(
+    updated,
+    'Passbook changed; benefit eligibility rechecked'
+  );
   res.json({
     success: true,
     customer: publicCustomer(updated),
@@ -1556,6 +2265,11 @@ app.post('/api/admin/manual-passbook-bulk', adminAuth, wrap(async (req, res) => 
   }
 
   updated = await ensureSchemeFresh(updated);
+
+  await reconcileBenefitClaims(
+    updated,
+    'Passbook changed; benefit eligibility rechecked'
+  );
 
   res.json({
     success: true,
@@ -1799,6 +2513,453 @@ app.post('/api/customer/redeem-scheme', customerAuth, wrap(async (req, res) => {
   });
 }));
 
+
+// GOLD SCHEME BENEFIT CLAIMS
+
+app.get(
+  '/api/customer/benefit-claim',
+  customerAuth,
+  wrap(async (req, res) => {
+    const claim = await BenefitClaim.findOne({
+      customer: req.customer._id,
+      schemeCycle: schemeCycle(req.customer)
+    }).lean();
+
+    res.json({
+      success: true,
+      claim: claim || null
+    });
+  })
+);
+
+app.post(
+  '/api/customer/benefit-claim',
+  customerAuth,
+  wrap(async (req, res) => {
+    const customer = req.customer;
+
+    if (!scheme.eligible(customer)) {
+      bad(
+        409,
+        'Benefit is available only after 12 verified installments and the original 13th-month date.'
+      );
+    }
+
+    let claim = await BenefitClaim.findOne({
+      customer: customer._id,
+      schemeCycle: schemeCycle(customer)
+    });
+
+    if (claim?.status === 'Redeemed') {
+      bad(
+        409,
+        'This scheme benefit has already been redeemed.'
+      );
+    }
+
+    if (claim?.status === 'Revoked') {
+      claim.status = 'Pending';
+      claim.adminReason = '';
+      claim.needsReview = false;
+      claim.verifiedAt = null;
+      claim.verifiedBy = '';
+      claim.originalStartDate = customer.startDate;
+      claim.benefitDate =
+        scheme.schemeBenefitDate(customer);
+      claim.totalPaid =
+        scheme.paidCount(customer) *
+        Number(customer.customInstallment || 0);
+      claim.verifiedInstallments = 12;
+
+      await claim.save();
+
+      await AdminAudit.create({
+        action: 'BENEFIT_CLAIM_REOPENED',
+        customerRef: customer._id,
+        customerId: customer.customerId,
+        reason: 'Customer became eligible again',
+        details: {
+          claimId: claim.claimId
+        }
+      });
+    }
+
+    if (!claim) {
+      const claimId =
+        'RJBC-' +
+        Date.now().toString(36).toUpperCase() +
+        '-' +
+        randomBytes(5).toString('hex').toUpperCase();
+
+      try {
+        claim = await BenefitClaim.create({
+          customer: customer._id,
+          customerId: customer.customerId,
+          schemeCycle: schemeCycle(customer),
+          claimId,
+          status: 'Pending',
+          originalStartDate: customer.startDate,
+          benefitDate:
+            scheme.schemeBenefitDate(customer),
+          verifiedInstallments: 12,
+          totalPaid:
+            scheme.paidCount(customer) *
+            Number(customer.customInstallment || 0)
+        });
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+
+        claim = await BenefitClaim.findOne({
+          customer: customer._id,
+          schemeCycle: schemeCycle(customer)
+        });
+
+        if (!claim) throw error;
+      }
+
+      await AdminAudit.create({
+        action: 'BENEFIT_CLAIM_CREATED',
+        customerRef: customer._id,
+        customerId: customer.customerId,
+        reason: 'Eligible customer requested scheme benefit',
+        details: {
+          claimId: claim.claimId,
+          benefitDate: claim.benefitDate
+        }
+      });
+    }
+
+    res.json({
+      success: true,
+      claim,
+      message:
+        'Benefit claim recorded. Present the digital card at the showroom for verification.'
+    });
+  })
+);
+
+app.get(
+  '/api/admin/benefit-claims',
+  adminAuth,
+  wrap(async (req, res) => {
+    const status = clean(req.query.status);
+    const filter = {};
+
+    if (status) {
+      if (![
+        'Pending',
+        'Verified',
+        'Redeemed',
+        'Revoked'
+      ].includes(status)) {
+        bad(400, 'Invalid claim status.');
+      }
+
+      filter.status = status;
+    }
+
+    const claims = await BenefitClaim.find(filter)
+      .populate(
+        'customer',
+        'name phone customerId schemeStatus paidMonths startDate'
+      )
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+
+    res.json({
+      success: true,
+      claims
+    });
+  })
+);
+
+app.post(
+  '/api/admin/benefit-claims/:id/verify',
+  adminAuth,
+  wrap(async (req, res) => {
+    if (!validId(req.params.id)) {
+      bad(400, 'Invalid claim ID.');
+    }
+
+    const claim = await BenefitClaim.findById(
+      req.params.id
+    );
+
+    if (!claim) {
+      bad(404, 'Benefit claim not found.');
+    }
+
+    if (claim.status !== 'Pending') {
+      bad(409, 'Only pending claims can be verified.');
+    }
+
+    const customer = await User.findById(
+      claim.customer
+    );
+
+    if (
+      !customer ||
+      schemeCycle(customer) !== claim.schemeCycle ||
+      !scheme.eligible(customer)
+    ) {
+      if (customer) {
+        await reconcileBenefitClaims(
+          customer,
+          'Eligibility failed during admin verification'
+        );
+      }
+
+      bad(409, 'Customer is no longer eligible.');
+    }
+
+    const updated = await BenefitClaim.findOneAndUpdate(
+      {
+        _id: claim._id,
+        status: 'Pending'
+      },
+      {
+        $set: {
+          status: 'Verified',
+          verifiedAt: new Date(),
+          verifiedBy: ADMIN_EMAIL,
+          needsReview: false
+        }
+      },
+      { new: true }
+    );
+
+    if (!updated) {
+      bad(409, 'Claim status changed. Refresh.');
+    }
+
+    await AdminAudit.create({
+      action: 'BENEFIT_CLAIM_VERIFIED',
+      customerRef: customer._id,
+      customerId: customer.customerId,
+      reason: 'Admin verified customer benefit eligibility',
+      details: {
+        claimId: updated.claimId
+      }
+    });
+
+    res.json({
+      success: true,
+      claim: updated
+    });
+  })
+);
+
+app.post(
+  '/api/admin/benefit-claims/:id/redeem',
+  adminAuth,
+  wrap(async (req, res) => {
+    if (!validId(req.params.id)) {
+      bad(400, 'Invalid claim ID.');
+    }
+
+    const claim = await BenefitClaim.findById(
+      req.params.id
+    );
+
+    if (!claim || claim.status !== 'Verified') {
+      bad(
+        409,
+        'Claim must be verified and not previously redeemed.'
+      );
+    }
+
+    const customer = await User.findById(
+      claim.customer
+    );
+
+    if (
+      !customer ||
+      schemeCycle(customer) !== claim.schemeCycle ||
+      !scheme.eligible(customer)
+    ) {
+      if (customer) {
+        await reconcileBenefitClaims(
+          customer,
+          'Eligibility failed during redemption'
+        );
+      }
+
+      bad(409, 'Customer is no longer eligible.');
+    }
+
+    const productId = req.body.productId;
+
+    if (!validId(productId)) {
+      bad(
+        400,
+        'Select the eligible Gold Jewellery product.'
+      );
+    }
+
+    const product = await Product.findById(
+      productId
+    );
+
+    if (!product) {
+      bad(404, 'Selected product not found.');
+    }
+
+    const rootCategory =
+      product.categoryId
+        ? await getRootCategory(product.categoryId)
+        : null;
+
+    const isGold =
+      String(rootCategory?.name || product.category)
+        .trim()
+        .toLowerCase() === 'gold';
+
+    if (!isGold) {
+      bad(
+        409,
+        'Benefit is valid only for eligible Gold Jewellery.'
+      );
+    }
+
+    const makingCharges = Number(
+      req.body.standardMakingCharges
+    );
+
+    if (
+      !Number.isFinite(makingCharges) ||
+      makingCharges < 0
+    ) {
+      bad(
+        400,
+        'Enter the actual making/labour charges.'
+      );
+    }
+
+    const reason = safe(
+      req.body.reason,
+      400
+    );
+
+    if (reason.length < 5) {
+      bad(
+        400,
+        'Enter a redemption note of at least 5 characters.'
+      );
+    }
+
+    const updated = await BenefitClaim.findOneAndUpdate(
+      {
+        _id: claim._id,
+        status: 'Verified',
+        needsReview: false
+      },
+      {
+        $set: {
+          status: 'Redeemed',
+          redeemedAt: new Date(),
+          redeemedBy: ADMIN_EMAIL,
+          redeemedProduct: product._id,
+          makingCharges,
+          discountAmount: makingCharges,
+          adminReason: reason
+        }
+      },
+      { new: true }
+    );
+
+    if (!updated) {
+      bad(
+        409,
+        'Claim already redeemed or changed. Refresh.'
+      );
+    }
+
+    await AdminAudit.create({
+      action: 'BENEFIT_CLAIM_REDEEMED',
+      customerRef: customer._id,
+      customerId: customer.customerId,
+      reason,
+      details: {
+        claimId: updated.claimId,
+        productId: String(product._id),
+        productTitle: product.title,
+        makingCharges,
+        discountAmount: makingCharges,
+        goldOnly: true,
+        freeGold: false
+      }
+    });
+
+    res.json({
+      success: true,
+      claim: updated,
+      makingChargesDiscountPercentage: 100,
+      makingChargesToPay: 0,
+      discountAmount: makingCharges,
+      message:
+        'Making/labour charge benefit redeemed for eligible Gold Jewellery.'
+    });
+  })
+);
+
+app.post(
+  '/api/admin/benefit-claims/:id/revoke',
+  adminAuth,
+  wrap(async (req, res) => {
+    if (!validId(req.params.id)) {
+      bad(400, 'Invalid claim ID.');
+    }
+
+    const reason = safe(
+      req.body.reason,
+      400
+    );
+
+    if (reason.length < 5) {
+      bad(400, 'Enter a revocation reason.');
+    }
+
+    const claim = await BenefitClaim.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        status: {
+          $in: ['Pending', 'Verified']
+        }
+      },
+      {
+        $set: {
+          status: 'Revoked',
+          adminReason: reason
+        }
+      },
+      { new: true }
+    );
+
+    if (!claim) {
+      bad(
+        409,
+        'Only unredeemed claims can be revoked.'
+      );
+    }
+
+    await AdminAudit.create({
+      action: 'BENEFIT_CLAIM_REVOKED_BY_ADMIN',
+      customerRef: claim.customer,
+      customerId: claim.customerId,
+      reason,
+      details: {
+        claimId: claim.claimId
+      }
+    });
+
+    res.json({
+      success: true,
+      claim
+    });
+  })
+);
+
 // SCHEME ALERTS AND REACTIVATION
 app.get('/api/admin/scheme-alerts', adminAuth, wrap(async (_req, res) => {
   await sweepOverdueSchemes();
@@ -1977,6 +3138,12 @@ app.post('/api/admin/scheme/:id/cancel',
 
     if (!c)
       bad(409, 'Only active schemes can be cancelled.');
+
+    await reconcileBenefitClaims(
+      c,
+      'Scheme manually cancelled by admin'
+    );
+
     await AdminAudit.create({
       action: 'SCHEME_MANUAL_CANCEL',
       customerRef: c._id,
@@ -2271,6 +3438,24 @@ app.put('/api/store/settings', adminAuth, wrap(async (req, res) => {
     bad(400, 'Valid UPI ID and merchant name required.');
 
   const qrCodeUrl = req.body.qrCodeUrl;
+
+  const contactNumbers = req.body.contactNumbers;
+
+  if (contactNumbers !== undefined) {
+    if (
+      !Array.isArray(contactNumbers) ||
+      contactNumbers.length !== 2 ||
+      contactNumbers.some(
+        number => !validPhone(String(number))
+      ) ||
+      new Set(contactNumbers.map(String)).size !== 2
+    ) {
+      bad(
+        400,
+        'Enter two different valid Indian mobile numbers.'
+      );
+    }
+  }
   if (qrCodeUrl !== undefined && qrCodeUrl &&
       !/^(data:image\/(?:png|jpeg|webp);base64,|https:\/\/)/i.test(qrCodeUrl))
     bad(400, 'Invalid QR image.');
@@ -2282,7 +3467,12 @@ app.put('/api/store/settings', adminAuth, wrap(async (req, res) => {
         upiId,
         merchantName,
         ...(qrCodeUrl !== undefined
-          ? { qrCodeUrl } : {})
+          ? { qrCodeUrl } : {}),
+        ...(contactNumbers !== undefined
+          ? {
+              contactNumbers: contactNumbers.map(String)
+            }
+          : {})
       }
     },
     { upsert: true, new: true }
@@ -2408,7 +3598,19 @@ app.get('/api/gold-rate/stream', wrap(async (req, res) => {
 }));
 
 // AI SUPPORT CHAT
-app.post('/api/support/chat', wrap(async (req, res) => {
+
+const chatLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 25,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message:
+      'Too many support messages. Please try again later.'
+  }
+});
+app.post('/api/support/chat', chatLimiter, wrap(async (req, res) => {
   const message = safe(req.body.message, 1500);
   if (!message) bad(400, 'Message required.');
   if (!ai)
@@ -2419,7 +3621,7 @@ app.post('/api/support/chat', wrap(async (req, res) => {
     contents: message,
     config: {
       systemInstruction:
-        `You are the Hindi-first assistant for Rahul Jewellers Sheoganj, Rajasthan. ` +
+        `You are the Hindi-first assistant for Rahul Jewellers Shivganj, Rajasthan. Contact numbers: 9950091024 and 9461452322. ` +
         `The showroom sells Gold and Silver jewellery. ` +
         `The 12+1 savings scheme is GOLD ONLY. ` +
         `Customers pay 12 monthly installments, and in the following month eligible ` +
@@ -2560,8 +3762,47 @@ mongoose.connect(MONGO_URI).then(async () => {
 
   await Promise.all([
     User.init(),
-    PaymentRequest.init()
+    PaymentRequest.init(),
+    Product.init(),
+    BenefitClaim.init()
   ]);
+
+  // Give legacy products a stable URL and gallery.
+  // No existing product is deleted or replaced.
+  const legacyProducts = Product.find({
+    $or: [
+      { slug: { $exists: false } },
+      { slug: '' },
+      { images: { $exists: false } },
+      { images: { $size: 0 } }
+    ]
+  }).cursor();
+
+  for await (const product of legacyProducts) {
+    let changed = false;
+
+    if (!product.slug) {
+      product.slug = jewellerySlug(product.title);
+      changed = true;
+    }
+
+    if (
+      (!Array.isArray(product.images) ||
+        product.images.length === 0) &&
+      product.imageUrl
+    ) {
+      product.images = [{
+        url: product.imageUrl,
+        alt: product.title
+      }];
+
+      changed = true;
+    }
+
+    if (changed) {
+      await product.save();
+    }
+  }
   await sweepOverdueSchemes();
 
   const schemeSweepTimer = setInterval(() => {

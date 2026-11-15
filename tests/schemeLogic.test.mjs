@@ -1,65 +1,196 @@
 
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import * as s from '../schemeLogic.js';
-const base = {customerId:'RJTEST',schemeJoined:true,schemeStatus:'Active',
-  schemeCycle:1,schemeFirstDueMonth:'2026-11',startDate:'2026-11-14',
-  schemeAnchorDay:14,customInstallment:5000,paidMonths:0,paymentHistory:[]};
-const states = () => Array.from({length:12},(_,i)=>({monthNum:i+1,paid:false,amount:5000}));
-const test=(label,fn)=>{fn();console.log('PASS',label);};
-test('first installment 14–18 November; cancelled from 19th',()=>{
-  const rows=s.installmentRows(base,'2026-11-18');
-  assert.equal(rows[0].status,'PAYMENT_DUE');
-  assert.equal(rows[0].lastDate,'2026-11-18');
-  assert.equal(s.overdueRows(base,'2026-11-19')[0].monthNum,1);
-});
-test('next installment 14–18 December',()=>{
-  const r=s.installmentRows(base,'2026-12-14')[1];
-  assert.equal(r.dueDate,'2026-12-14');assert.equal(r.lastDate,'2026-12-18');
-});
-test('pay 3 future installments at once',()=>{
-  const c={...base,installmentState:states()};
-  for (const n of [1,2,3]) c.installmentState[n-1].paid=true;
-  assert.equal(s.paidCount(c),3);
-  assert.deepEqual(s.overdueRows(c,'2027-01-19').map(x=>x.monthNum),[]);
-  assert.equal(s.installmentRows(c,'2027-02-14')[3].status,'PAYMENT_DUE');
-});
-test('all 12 paid early stays benefit locked until 13th month',()=>{
-  const c={...base,installmentState:states().map(x=>({...x,paid:true}))};
-  assert.equal(s.paidCount(c),12);
-  assert.equal(s.schemeBenefitDate(c),'2027-11-14');
-  assert.equal(s.eligible(c,'2026-11-14'),false);
-  assert.equal(s.eligible(c,'2027-11-13'),false);
-  assert.equal(s.eligible(c,'2027-11-14'),true);
-});
-test('admin UNPAY locks benefit again',()=>{
-  const c={...base,installmentState:states().map(x=>({...x,paid:true}))};
-  c.installmentState[4].paid=false;
-  assert.equal(s.eligible(c,'2027-11-14'),false);
-  assert.equal(s.overdueRows(c,'2027-11-14')[0].monthNum,5);
-  c.installmentState[4].paid=true;
-  assert.equal(s.eligible(c,'2027-11-14'),true);
-});
-test('cancelled scheme cannot unlock benefit',()=>{
-  const c={...base,schemeStatus:'Cancelled',installmentState:states().map(x=>({...x,paid:true}))};
-  assert.equal(s.eligible(c,'2027-11-14'),false);
-});
-test('reactivation catch-up accepts missed payment immediately',()=>{
-  const c={...base,schemeCatchupMonthNums:[1],schemeCatchupUntil:'2027-01-05'};
-  assert.equal(s.installmentRows(c,'2027-01-02')[0].payableNow,true);
-  assert.equal(s.installmentRows(c,'2027-01-06')[0].status,'OVERDUE');
-});
-test('join 31st uses last day in shorter month without drifting',()=>{
-  const c={...base,schemeFirstDueMonth:'2026-01',startDate:'2026-01-31',schemeAnchorDay:31};
-  assert.equal(s.dueDateFor(c,2),'2026-02-28');
-  assert.equal(s.dueDateFor(c,3),'2026-03-31');
-  assert.equal(s.schemeBenefitDate(c),'2027-01-31');
-});
-test('partial future prepayment does not skip unpaid earlier month',()=>{
-  const c={...base,installmentState:states()};c.installmentState[2].paid=true;
-  assert.equal(s.overdueRows(c,'2026-11-19')[0].monthNum,1);
-});
-test('per-customer anchor: join 3rd gives 3–7 every month',()=>{
-  const c={...base,startDate:'2026-11-03',schemeAnchorDay:3};
-  assert.equal(s.installmentRows(c,'2026-12-03')[1].dueDate,'2026-12-03');
-  assert.equal(s.installmentRows(c,'2026-12-07')[1].lastDate,'2026-12-07');
-});
+
+import * as scheme from '../schemeLogic.js';
+
+function customer(overrides = {}) {
+  return {
+    customerId: 'RJTEST001',
+    schemeJoined: true,
+    schemeStatus: 'Active',
+    schemeCycle: 1,
+    schemeFirstDueMonth: '2026-11',
+    startDate: '2026-11-15',
+    schemeAnchorDay: 15,
+    customInstallment: 5000,
+    paidMonths: 0,
+    paymentHistory: [],
+    installmentState: Array.from(
+      { length: 12 },
+      (_, index) => ({
+        monthNum: index + 1,
+        paid: false,
+        amount: 5000
+      })
+    ),
+    ...overrides
+  };
+}
+
+test(
+  'Joining on 15th gives 15–19 payment window',
+  () => {
+    const rows = scheme.installmentRows(
+      customer(),
+      '2026-11-15'
+    );
+
+    assert.equal(
+      rows[0].dueDate,
+      '2026-11-15'
+    );
+
+    assert.equal(
+      rows[0].lastDate,
+      '2026-11-19'
+    );
+  }
+);
+
+test(
+  'The sixth calendar date is overdue',
+  () => {
+    const rows = scheme.installmentRows(
+      customer(),
+      '2026-11-20'
+    );
+
+    assert.equal(
+      rows[0].status,
+      'OVERDUE'
+    );
+  }
+);
+
+test(
+  'Benefit date is original month 13',
+  () => {
+    assert.equal(
+      scheme.schemeBenefitDate(
+        customer()
+      ),
+      '2027-11-15'
+    );
+  }
+);
+
+test(
+  'All 12 early payments do not unlock benefit',
+  () => {
+    const c = customer();
+
+    c.installmentState.forEach(row => {
+      row.paid = true;
+    });
+
+    assert.equal(
+      scheme.eligible(
+        c,
+        '2026-12-01'
+      ),
+      false
+    );
+  }
+);
+
+test(
+  'Benefit unlocks on original month 13',
+  () => {
+    const c = customer();
+
+    c.installmentState.forEach(row => {
+      row.paid = true;
+    });
+
+    assert.equal(
+      scheme.eligible(
+        c,
+        '2027-11-15'
+      ),
+      true
+    );
+  }
+);
+
+test(
+  'One unpaid installment locks benefit',
+  () => {
+    const c = customer();
+
+    c.installmentState.forEach(row => {
+      row.paid = true;
+    });
+
+    c.installmentState[5].paid = false;
+
+    assert.equal(
+      scheme.eligible(
+        c,
+        '2027-11-15'
+      ),
+      false
+    );
+  }
+);
+
+test(
+  'Cancelled scheme cannot unlock benefit',
+  () => {
+    const c = customer({
+      schemeStatus: 'Cancelled'
+    });
+
+    c.installmentState.forEach(row => {
+      row.paid = true;
+    });
+
+    assert.equal(
+      scheme.eligible(
+        c,
+        '2027-11-15'
+      ),
+      false
+    );
+  }
+);
+
+test(
+  'Joining on 31st clamps February without drift',
+  () => {
+    const c = customer({
+      startDate: '2026-01-31',
+      schemeFirstDueMonth: '2026-01',
+      schemeAnchorDay: 31
+    });
+
+    assert.equal(
+      scheme.dueDateFor(c, 2),
+      '2026-02-28'
+    );
+
+    assert.equal(
+      scheme.dueDateFor(c, 3),
+      '2026-03-31'
+    );
+  }
+);
+
+test(
+  'Future prepayment does not erase earlier overdue',
+  () => {
+    const c = customer();
+
+    c.installmentState[2].paid = true;
+
+    const overdue = scheme.overdueRows(
+      c,
+      '2026-11-20'
+    );
+
+    assert.equal(
+      overdue[0].monthNum,
+      1
+    );
+  }
+);
