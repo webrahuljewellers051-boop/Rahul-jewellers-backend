@@ -1,5 +1,5 @@
 
-// Rahul Jewellers Sheoganj — complete backend server.js
+// Rahul Jewellers SHEOGANJ — complete backend server.js
 // RJ_BACKEND_UPDATE_V3
 // Required .env: MONGO_URI, JWT_SECRET, ADMIN_EMAIL, RESEND_API_KEY, RESEND_FROM,
 // CORS_ORIGINS (comma-separated customer/admin website origins).
@@ -18,6 +18,7 @@ import { randomInt, randomBytes, scrypt as scryptCallback, createHash, timingSaf
 import { promisify } from 'node:util';
 import { GoogleGenAI } from '@google/genai';
 import * as scheme from './schemeLogic.js';
+import { mainCategoryName, isProtectedRoot, canMoveBetweenRoots } from './categoryPolicy.js';
 
 dotenv.config();
 const app = express();
@@ -77,6 +78,7 @@ const normalizeEmail = value => clean(value).toLowerCase();
 const validEmail = value => value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value);
 const validAmount = value => Number.isInteger(value) && value >= 5000 && value <= 1000000;
 const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 
 function istParts(date, fields) {
   return Object.fromEntries(new Intl.DateTimeFormat('en-US', {
@@ -342,7 +344,8 @@ const productSchema = new mongoose.Schema({
   },
   description: {
     type: String,
-    default: ''
+    required: true,
+    trim: true
   },
   price: {
     type: Number,
@@ -696,6 +699,32 @@ async function refundQuote(customer) {
   return refundQuoteFromLedger(customer, approved);
 }
 
+// RJ_ADMIN_JWT_REVOCATION_V1
+// One MongoDB record per admin login.
+const adminSessionSchema = new mongoose.Schema({
+  tokenHash: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  expiresAt: {
+    type: Date,
+    required: true
+  }
+}, { timestamps: true });
+
+adminSessionSchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0 }
+);
+
+const AdminSession =
+  mongoose.models.AdminSession ||
+  mongoose.model(
+    'AdminSession',
+    adminSessionSchema
+  );
+
 function customerToken(c) {
   return jwt.sign({
     sub: String(c._id),
@@ -709,28 +738,59 @@ function readToken(req, cookieName) {
   return typeof auth === 'string' && auth.startsWith('Bearer ')
     ? auth.slice(7).trim() : req.cookies?.[cookieName];
 }
-function adminAuth(req, res, next) {
-  try {
-    const token = readToken(req, 'admin_token');
-    if (!token)
-      return res.status(401).json({
-        success: false, message: 'Admin login required.'
-      });
-    const p = jwt.verify(token, JWT_SECRET);
-    if (!(p.type === 'admin' || p.role === 'admin' ||
-      (!p.type && !p.role &&
-        clean(p.email).toLowerCase() === ADMIN_EMAIL))) {
-      return res.status(403).json({
-        success: false, message: 'Admin access only.'
-      });
-    }
-    next();
-  } catch {
-    res.status(401).json({
-      success: false, message: 'Admin session expired.'
-    });
+const adminAuth = wrap(async (req, res, next) => {
+  const token = readToken(req, 'admin_token');
+
+  if (!token) {
+    bad(401, 'Admin login required.');
   }
-}
+
+  let payload;
+
+  try {
+    payload = jwt.verify(token, JWT_SECRET, {
+      algorithms: ['HS256']
+    });
+  } catch {
+    bad(401, 'Admin session expired.');
+  }
+
+  if (
+    payload.sub !== 'admin' ||
+    payload.type !== 'admin' ||
+    payload.role !== 'admin' ||
+    normalizeEmail(payload.email) !== ADMIN_EMAIL ||
+    !/^[a-f0-9]{64}$/.test(
+      String(payload.jti || '')
+    )
+  ) {
+    bad(
+      401,
+      'Admin session invalid. Please log in again.'
+    );
+  }
+
+  const tokenHash = createHash('sha256')
+    .update(payload.jti)
+    .digest('hex');
+
+  const session = await AdminSession.exists({
+    tokenHash,
+    expiresAt: {
+      $gt: new Date()
+    }
+  });
+
+  if (!session) {
+    bad(
+      401,
+      'Admin session revoked. Please log in again.'
+    );
+  }
+
+  req.adminSessionHash = tokenHash;
+  next();
+});
 
 const customerAuth = wrap(async (req, res, next) => {
   const token = readToken(req, 'customer_token');
@@ -753,7 +813,7 @@ const customerAuth = wrap(async (req, res, next) => {
 });
 
 app.get('/', (_req, res) =>
-  res.send('Rahul Jewellers Sheoganj Backend is Running'));
+  res.send('Rahul Jewellers SHEOGANJ Backend is Running'));
 app.get('/health', (_req, res) =>
   res.json({
     success: true,
@@ -800,9 +860,25 @@ app.post('/api/client/verify-email-otp', loginLimiter, wrap(async (req, res) => 
       ))
     bad(401, 'Incorrect OTP.');
   otpStorage.delete(email);
+
+  const jti = randomBytes(32).toString('hex');
+
   const token = jwt.sign({
     sub: 'admin', type: 'admin', role: 'admin', email
-  }, JWT_SECRET, { expiresIn: '7d' });
+  }, JWT_SECRET, {
+    expiresIn: '7d',
+    jwtid: jti,
+    algorithm: 'HS256'
+  });
+
+  await AdminSession.create({
+    tokenHash: createHash('sha256')
+      .update(jti)
+      .digest('hex'),
+    expiresAt: new Date(
+      Date.now() + 7 * 24 * 60 * 60 * 1000
+    )
+  });
   res.json({
     success: true, token, message: 'Admin verified.'
   });
@@ -812,12 +888,23 @@ app.get('/api/client/admin-session', adminAuth,
   (_req, res) => res.json({
     success: true, message: 'Session active.'
   }));
-app.post('/api/client/admin-logout', (_req, res) => {
-  res.clearCookie('admin_token', {
-    httpOnly: true, secure: true, sameSite: 'none'
-  });
-  res.json({ success: true });
-});
+app.post(
+  '/api/client/admin-logout',
+  adminAuth,
+  wrap(async (req, res) => {
+    await AdminSession.deleteOne({
+      tokenHash: req.adminSessionHash
+    });
+
+    res.clearCookie('admin_token', {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none'
+    });
+
+    res.json({ success: true });
+  })
+);
 
 // SHOWROOM PRODUCTS AND NESTED CATEGORIES
 
@@ -837,6 +924,11 @@ function jewellerySlug(title) {
   return base + '-' + randomBytes(4).toString('hex');
 }
 
+
+// Protect MongoDB documents from oversized image galleries.
+const MAX_PRODUCT_IMAGES = 12;
+const MAX_EMBEDDED_IMAGE_CHARS = 6 * 1024 * 1024;
+
 function normalizeImages(body, existing = []) {
   if (
     body.images === undefined &&
@@ -845,19 +937,27 @@ function normalizeImages(body, existing = []) {
     return existing;
   }
 
-  let images = body.images;
-
-  if (!Array.isArray(images)) {
-    images = body.imageUrl
+  const images = Array.isArray(body.images)
+    ? body.images
+    : body.imageUrl
       ? [body.imageUrl]
       : existing;
+
+  if (!images.length) {
+    bad(400, 'At least one product photo is required.');
   }
 
-  if (images.length > 12) {
-    bad(400, 'Maximum 12 product images are allowed.');
+  if (images.length > MAX_PRODUCT_IMAGES) {
+    bad(
+      400,
+      'Maximum ' + MAX_PRODUCT_IMAGES +
+      ' product photos are allowed.'
+    );
   }
 
-  return images.map((image, index) => {
+  let embeddedChars = 0;
+
+  const normalized = images.map((image, index) => {
     const url = typeof image === 'string'
       ? image
       : image?.url;
@@ -869,23 +969,42 @@ function normalizeImages(body, existing = []) {
     if (!validJewelleryImage(url)) {
       bad(
         400,
-        'Invalid image URL at position ' + (index + 1)
+        'Invalid HTTPS image URL or image data at position ' +
+        (index + 1)
       );
     }
 
+    const cleanUrl = String(url);
+
+    if (cleanUrl.startsWith('data:')) {
+      embeddedChars += cleanUrl.length;
+    } else if (cleanUrl.length > 2048) {
+      bad(400, 'Image URL exceeds 2048 characters.');
+    }
+
     return {
-      url: String(url),
+      url: cleanUrl,
       alt: safe(alt, 150)
     };
   });
+
+  if (embeddedChars > MAX_EMBEDDED_IMAGE_CHARS) {
+    bad(
+      413,
+      'Photos exceed the 6 MB storage budget. ' +
+      'Compress them or use HTTPS image URLs.'
+    );
+  }
+
+  return normalized;
 }
 
-async function getRootCategory(categoryId) {
+async function getRootCategory(categoryId, session = null) {
   if (!categoryId) return null;
 
   let current = await Category.findById(
     categoryId
-  ).lean();
+  ).session(session).lean();
 
   if (!current) {
     bad(404, 'Selected jewellery folder not found.');
@@ -904,7 +1023,7 @@ async function getRootCategory(categoryId) {
 
     current = await Category.findById(
       current.parentCategory
-    ).lean();
+    ).session(session).lean();
 
     if (!current) {
       bad(409, 'Category parent is missing.');
@@ -914,9 +1033,10 @@ async function getRootCategory(categoryId) {
   return current;
 }
 
-async function categoryTreeIds(rootId) {
+async function categoryTreeIds(rootId, session = null) {
   const all = await Category.find()
     .select('_id parentCategory')
+    .session(session)
     .lean();
 
   const result = new Set([String(rootId)]);
@@ -940,6 +1060,15 @@ async function categoryTreeIds(rootId) {
   }
 
   return [...result];
+}
+
+async function siblingCategoryExists(name, parentId, excludeId = null) {
+  const query = {
+    name: { $regex: `^${escapeRegex(name)}$`, $options: 'i' },
+    parentCategory: parentId || null
+  };
+  if (excludeId) query._id = { $ne: excludeId };
+  return Boolean(await Category.exists(query));
 }
 
 function productFields(body, current = null) {
@@ -991,11 +1120,7 @@ function productFields(body, current = null) {
 
     fields.images = images;
 
-    if (images.length) {
-      fields.imageUrl = images[0].url;
-    } else if (body.imageUrl) {
-      fields.imageUrl = String(body.imageUrl);
-    }
+    fields.imageUrl = images[0].url;
   }
 
   return fields;
@@ -1050,29 +1175,22 @@ app.post(
   wrap(async (req, res) => {
     const fields = productFields(req.body);
 
-    if (!fields.title || !fields.weight) {
-      bad(
-        400,
-        'Product name and weight are required.'
-      );
+    if (!fields.title || !fields.weight || !fields.description) {
+      bad(400, 'Product name, main weight and description are required.');
     }
 
     const categoryId = req.body.categoryId;
-
-    if (categoryId) {
-      if (!validId(categoryId)) {
-        bad(400, 'Invalid folder ID.');
-      }
-
-      const root = await getRootCategory(categoryId);
-
-      fields.category = root.name;
-      fields.categoryId = categoryId;
+    if (!categoryId || !validId(categoryId)) {
+      bad(400, 'Choose a folder under Gold, Polki, Kundan, Diamond or Silver.');
     }
 
-    if (!fields.category) {
-      bad(400, 'Jewellery category is required.');
+    const root = await getRootCategory(categoryId);
+    if (!mainCategoryName(root.name)) {
+      bad(409, 'This folder is outside the five main jewellery categories.');
     }
+
+    fields.category = mainCategoryName(root.name);
+    fields.categoryId = categoryId;
 
     if (!fields.imageUrl) {
       bad(400, 'At least one image is required.');
@@ -1113,20 +1231,21 @@ app.put(
     if (req.body.categoryId !== undefined) {
       const categoryId = req.body.categoryId;
 
-      if (!categoryId) {
-        fields.categoryId = null;
-      } else {
-        if (!validId(categoryId)) {
-          bad(400, 'Invalid folder ID.');
-        }
-
-        const root = await getRootCategory(
-          categoryId
-        );
-
-        fields.categoryId = categoryId;
-        fields.category = root.name;
+      if (!categoryId || !validId(categoryId)) {
+        bad(400, 'Choose a valid jewellery folder.');
       }
+
+      const root = await getRootCategory(categoryId);
+      if (!mainCategoryName(root.name)) {
+        bad(409, 'Selected folder is outside the five main jewellery categories.');
+      }
+
+      fields.categoryId = categoryId;
+      fields.category = mainCategoryName(root.name);
+    } else if (existing.categoryId) {
+      // A caller cannot spoof a different metal by changing only category text.
+      const root = await getRootCategory(existing.categoryId);
+      fields.category = mainCategoryName(root.name) || root.name;
     }
 
     Object.assign(existing, fields);
@@ -1135,11 +1254,12 @@ app.put(
       !existing.title ||
       !existing.category ||
       !existing.weight ||
+      !existing.description ||
       !existing.imageUrl
     ) {
       bad(
         400,
-        'Name, category, weight and image are required.'
+        'Name, category, main weight, description and main image are required.'
       );
     }
 
@@ -1201,19 +1321,22 @@ app.post(
       req.body.parentCategory || null;
 
     if (parentId) {
-      if (!validId(parentId)) {
-        bad(400, 'Invalid parent category.');
+      if (!validId(parentId)) bad(400, 'Invalid parent category.');
+      const root = await getRootCategory(parentId);
+      if (!mainCategoryName(root.name)) {
+        bad(409, 'Subfolders must belong to one of the five main categories.');
       }
+    } else if (!mainCategoryName(name)) {
+      bad(400, 'Only Gold, Polki, Kundan, Diamond and Silver may be main categories.');
+    }
 
-      if (!await Category.exists({
-        _id: parentId
-      })) {
-        bad(404, 'Parent category not found.');
-      }
+    const normalizedName = parentId ? name : mainCategoryName(name);
+    if (await siblingCategoryExists(normalizedName, parentId)) {
+      bad(409, 'A folder with this name already exists under the selected parent.');
     }
 
     const category = await Category.create({
-      name,
+      name: normalizedName,
       description: safe(
         req.body.description,
         400
@@ -1233,126 +1356,191 @@ app.put(
   adminAuth,
   wrap(async (req, res) => {
     const id = req.params.id;
-
-    if (!validId(id)) {
-      bad(400, 'Invalid category ID.');
-    }
+    if (!validId(id)) bad(400, 'Invalid category ID.');
 
     const category = await Category.findById(id);
-
-    if (!category) {
-      bad(404, 'Category not found.');
+    if (!category) bad(404, 'Category not found.');
+    if (isProtectedRoot(category)) {
+      bad(403, 'The five permanent main categories cannot be edited or moved.');
     }
 
-    if (req.body.name !== undefined) {
-      const name = safe(req.body.name, 100);
+    const oldRoot = await getRootCategory(id);
+    const name = req.body.name !== undefined
+      ? safe(req.body.name, 100)
+      : category.name;
+    if (!name) bad(400, 'Category name cannot be empty.');
 
-      if (!name) {
-        bad(400, 'Category name cannot be empty.');
+    const parentId = req.body.parentCategory !== undefined
+      ? (req.body.parentCategory || null)
+      : (category.parentCategory || null);
+
+    if (parentId) {
+      if (!validId(parentId)) bad(400, 'Invalid parent category.');
+      const descendants = await categoryTreeIds(id);
+      if (descendants.includes(String(parentId))) {
+        bad(409, 'Cannot move a folder inside itself or its subfolder.');
       }
-
-      category.name = name;
+      const destinationRoot = await getRootCategory(parentId);
+      const destinationType = mainCategoryName(destinationRoot.name);
+      if (!destinationType) {
+        bad(409, 'Destination must belong to a main jewellery category.');
+      }
+      if (!canMoveBetweenRoots(oldRoot.name, destinationRoot.name)) {
+        bad(409, 'Cannot move folders between Gold, Polki, Kundan, Diamond and Silver.');
+      }
+    } else {
+      // Existing legacy root folders can be migrated under a main root,
+      // but cannot be converted into a sixth main category.
+      bad(400, 'Choose a parent under one of the five main categories.');
     }
 
+    if (await siblingCategoryExists(name, parentId, id)) {
+      bad(409, 'A folder with this name already exists under the selected parent.');
+    }
+
+    category.name = name;
+    category.parentCategory = parentId;
     if (req.body.description !== undefined) {
-      category.description = safe(
-        req.body.description,
-        400
-      );
+      category.description = safe(req.body.description, 400);
     }
-
-    if (req.body.parentCategory !== undefined) {
-      const parentId =
-        req.body.parentCategory || null;
-
-      if (parentId) {
-        if (!validId(parentId)) {
-          bad(400, 'Invalid parent category.');
-        }
-
-        const descendants = await categoryTreeIds(id);
-
-        if (descendants.includes(String(parentId))) {
-          bad(
-            409,
-            'Cannot move a folder inside itself or its subfolder.'
-          );
-        }
-
-        if (!await Category.exists({
-          _id: parentId
-        })) {
-          bad(404, 'Parent category not found.');
-        }
-      }
-
-      category.parentCategory = parentId;
-    }
-
     await category.save();
 
     const root = await getRootCategory(id);
     const affectedIds = await categoryTreeIds(id);
-
     await Product.updateMany(
-      {
-        categoryId: {
-          $in: affectedIds
-        }
-      },
-      {
-        $set: {
-          category: root.name
-        }
-      }
+      { categoryId: { $in: affectedIds } },
+      { $set: { category: mainCategoryName(root.name) || root.name } }
     );
+
+    res.json({ success: true, category, affectedFolders: affectedIds.length });
+  })
+);
+
+// Atomic safe deletion: move direct products and subfolders, then delete.
+// MongoDB Atlas transactions keep all changes together on success/failure.
+app.post(
+  '/api/admin/categories/:id/move-and-delete',
+  adminAuth,
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    const destinationId = clean(req.body?.destinationId);
+    if (!validId(id) || (destinationId && !validId(destinationId))) {
+      bad(400, 'Invalid source or destination folder ID.');
+    }
+
+    const session = await mongoose.startSession();
+    let movedProducts = 0;
+    let movedFolders = 0;
+
+    try {
+      await session.withTransaction(async () => {
+        const target = await Category.findById(id).session(session);
+        if (!target) bad(404, 'Folder not found.');
+        if (isProtectedRoot(target)) {
+          bad(403, 'The five permanent main categories cannot be deleted.');
+        }
+
+        const directProducts = await Product.find({ categoryId: id })
+          .select('_id').session(session).lean();
+        const directChildren = await Category.find({ parentCategory: id })
+          .select('_id name').session(session).lean();
+        const hasContents = directProducts.length || directChildren.length;
+        if (hasContents && !destinationId) {
+          bad(409, 'Choose a destination to move products and subfolders before deletion.');
+        }
+
+        if (destinationId) {
+          const descendants = await categoryTreeIds(id, session);
+          if (descendants.includes(destinationId)) {
+            bad(409, 'Destination cannot be the folder itself or its subfolder.');
+          }
+          const destination = await Category.findById(destinationId)
+            .session(session).lean();
+          if (!destination) bad(404, 'Destination folder not found.');
+
+          const oldRoot = await getRootCategory(id, session);
+          const destinationRoot = await getRootCategory(destinationId, session);
+          const newType = mainCategoryName(destinationRoot.name);
+          if (!newType) bad(409, 'Destination must be under a main jewellery category.');
+          if (!canMoveBetweenRoots(oldRoot.name, destinationRoot.name)) {
+            bad(409, 'Cannot move products between different main jewellery types.');
+          }
+
+          const existingChildren = await Category.find({ parentCategory: destinationId })
+            .select('name').session(session).lean();
+          const usedNames = new Set(existingChildren.map(item =>
+            clean(item.name).toLowerCase()
+          ));
+          for (const child of directChildren) {
+            const key = clean(child.name).toLowerCase();
+            if (usedNames.has(key)) {
+              bad(409, `Destination already has a subfolder named ${safe(child.name, 100)}.`);
+            }
+            usedNames.add(key);
+          }
+
+          if (directChildren.length) {
+            await Category.updateMany(
+              { parentCategory: id },
+              { $set: { parentCategory: destination._id } },
+              { session }
+            );
+          }
+          if (directProducts.length) {
+            await Product.updateMany(
+              { categoryId: id },
+              { $set: { categoryId: destination._id, category: newType } },
+              { session }
+            );
+          }
+          // When moving a legacy root, its descendant products need the new root.
+          if (oldRoot.name !== destinationRoot.name && descendants.length > 1) {
+            await Product.updateMany(
+              { categoryId: { $in: descendants.filter(item => item !== id) } },
+              { $set: { category: newType } },
+              { session }
+            );
+          }
+        }
+
+        const result = await Category.deleteOne({ _id: id }, { session });
+        if (result.deletedCount !== 1) bad(409, 'Folder changed. Refresh and retry.');
+        movedProducts = directProducts.length;
+        movedFolders = directChildren.length;
+      });
+    } finally {
+      await session.endSession();
+    }
 
     res.json({
       success: true,
-      category,
-      affectedFolders: affectedIds.length
+      message: 'Folder deleted. Products and subfolders were preserved.',
+      movedProducts,
+      movedFolders
     });
   })
 );
 
+// The simple DELETE endpoint only deletes an empty subfolder.
 app.delete(
   '/api/admin/categories/:id',
   adminAuth,
   wrap(async (req, res) => {
     const id = req.params.id;
-
-    if (!validId(id)) {
-      bad(400, 'Invalid category ID.');
+    if (!validId(id)) bad(400, 'Invalid category ID.');
+    const target = await Category.findById(id);
+    if (!target) bad(404, 'Category not found.');
+    if (isProtectedRoot(target)) {
+      bad(403, 'The five permanent main categories cannot be deleted.');
     }
-
-    if (await Product.exists({
-      categoryId: id
-    })) {
-      bad(
-        409,
-        'Move products out of this folder first.'
-      );
+    if (await Product.exists({ categoryId: id })) {
+      bad(409, 'Move products out of this folder first.');
     }
-
-    if (await Category.exists({
-      parentCategory: id
-    })) {
-      bad(
-        409,
-        'Move or delete subfolders first.'
-      );
+    if (await Category.exists({ parentCategory: id })) {
+      bad(409, 'Move or delete subfolders first.');
     }
-
-    const deleted = await Category.findByIdAndDelete(id);
-
-    if (!deleted) {
-      bad(404, 'Category not found.');
-    }
-
-    res.json({
-      success: true,
-      message: 'Category deleted.'
-    });
+    await Category.deleteOne({ _id: id });
+    res.json({ success: true, message: 'Empty folder deleted.' });
   })
 );
 
@@ -1436,7 +1624,7 @@ app.post('/api/customer/login', loginLimiter, wrap(async (req, res) => {
   if (!customer || !await verifyPassword(password, customer.password))
     bad(401, 'Incorrect login details.');
   if (customer.isActive === false)
-    bad(403, 'Account deactivated. Contact Rahul Jewellers Sheoganj.');
+    bad(403, 'Account deactivated. Contact Rahul Jewellers SHEOGANJ.');
   if (!customer.password.startsWith('scrypt$')) {
     customer.password = await hashPassword(password);
     await customer.save();
@@ -3510,7 +3698,7 @@ app.post('/api/admin/send-whatsapp-reminder',
 
     const message =
       `नमस्ते ${c.name} जी,\n\n` +
-      `Rahul Jewellers Sheoganj Gold Savings Scheme रिमाइंडर।\n` +
+      `Rahul Jewellers SHEOGANJ Gold Savings Scheme रिमाइंडर।\n` +
       `Customer ID: ${c.customerId}\n` +
       `किस्त: ${month}/12\n` +
       `राशि: ₹${Number(c.customInstallment).toLocaleString('en-IN')}\n` +
@@ -3633,7 +3821,7 @@ app.post('/api/support/chat', chatLimiter, wrap(async (req, res) => {
     contents: message,
     config: {
       systemInstruction:
-        `You are the Hindi-first assistant for Rahul Jewellers Sheoganj, Rajasthan. Contact numbers: 9950091024 and 9461452322. ` +
+        `You are the Hindi-first assistant for Rahul Jewellers SHEOGANJ, Rajasthan. Contact numbers: 9950091024 and 9461452322. ` +
         `The showroom sells Gold and Silver jewellery. ` +
         `The 12+1 savings scheme is GOLD ONLY. ` +
         `Customers pay 12 monthly installments, and in the following month eligible ` +
@@ -3646,7 +3834,7 @@ app.post('/api/support/chat', chatLimiter, wrap(async (req, res) => {
   res.json({
     success: true,
     reply: response.text ||
-      'Please contact Rahul Jewellers Sheoganj.'
+      'Please contact Rahul Jewellers SHEOGANJ.'
   });
 }));
 

@@ -1,6 +1,6 @@
 
 /**
- * Rahul Jewellers Sheoganj
+ * Rahul Jewellers SHEOGANJ
  * Gold Scheme — 12 monthly installments + making-charge benefit
  *
  * Complete replacement: jewel-backend/schemeLogic.js
