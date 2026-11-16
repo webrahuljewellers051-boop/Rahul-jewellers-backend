@@ -58,7 +58,7 @@ const supportPath = path.join(
 );
 
 console.log('\n================================');
-console.log(' RAHUL JEWELLERS SHIVGANJ');
+console.log(' RAHUL JEWELLERS Sheoganj');
 console.log(' INTEGRATION ROUTE TEST');
 console.log('================================\n');
 
