@@ -18,6 +18,8 @@ import { randomInt, randomBytes, scrypt as scryptCallback, createHash, timingSaf
 import { promisify } from 'node:util';
 import { GoogleGenAI } from '@google/genai';
 import * as scheme from './schemeLogic.js';
+import { withinVerifiedDeposits } from './schemePurchasePolicy.js';
+import { validOptionalCustomerEmail } from './customerEmailPolicy.js';
 import { mainCategoryName, isProtectedRoot, canMoveBetweenRoots } from './categoryPolicy.js';
 
 dotenv.config();
@@ -75,7 +77,6 @@ const safe = (value, limit = 300) => clean(value).slice(0, limit);
 const validId = value => mongoose.isValidObjectId(value);
 const validPhone = value => /^[6-9]\d{9}$/.test(value);
 const normalizeEmail = value => clean(value).toLowerCase();
-const validEmail = value => value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value);
 const validAmount = value => Number.isInteger(value) && value >= 5000 && value <= 1000000;
 const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -279,6 +280,69 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
+// Separate, minimal contact directory. An admin deletion archives only
+// name, phone and DOB; financial records remain in restricted AdminAudit.
+const CustomerContact = mongoose.models.CustomerContact ||
+  mongoose.model('CustomerContact', new mongoose.Schema({
+    name: { type: String, required: true, maxlength: 100 },
+    phone: { type: String, required: true, unique: true },
+    dob: { type: String, default: '' }
+  }, { timestamps: false }));
+
+// Additional news / offers / announcements for the homepage carousel.
+// The first five editorial slides remain in the customer frontend.
+// Upcoming scheme listings are informational only: no payment/enrollment
+// is enabled until separate scheme-specific financial rules are approved.
+const UpcomingScheme = mongoose.models.UpcomingScheme ||
+  mongoose.model('UpcomingScheme', new mongoose.Schema({
+    name: { type: String, required: true, maxlength: 100 },
+    slug: { type: String, required: true, unique: true, maxlength: 80 },
+    description: { type: String, default: '', maxlength: 350 },
+    active: { type: Boolean, default: true }
+  }, { timestamps: true }));
+
+function upcomingSchemeInput(body) {
+  const name = safe(body.name, 100);
+  const slug = clean(body.slug).toLowerCase();
+  if (!name || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80)
+    bad(400, 'Enter a name and a lowercase URL slug (letters, numbers, hyphens).');
+  return { name, slug, description: safe(body.description, 350), active: body.active !== false };
+}
+
+const SiteAnnouncement = mongoose.models.SiteAnnouncement ||
+  mongoose.model('SiteAnnouncement', new mongoose.Schema({
+    eyebrow: { type: String, default: '', maxlength: 80 },
+    title: { type: String, required: true, maxlength: 120 },
+    description: { type: String, required: true, maxlength: 350 },
+    image: { type: String, required: true, maxlength: 1200 },
+    cta: { type: String, default: 'Explore Collection', maxlength: 50 },
+    action: { type: String, enum: ['collection', 'scheme', 'coming-soon'], default: 'collection' },
+    schemeSlug: { type: String, default: 'swarn-bachat-yojana', maxlength: 80 },
+    sortOrder: { type: Number, default: 0 },
+    active: { type: Boolean, default: true }
+  }, { timestamps: true }));
+
+function announcementInput(body) {
+  const title = safe(body.title, 120);
+  const description = safe(body.description, 350);
+  const image = clean(body.image);
+  const action = clean(body.action) || 'collection';
+  const sortOrder = Number(body.sortOrder ?? 0);
+  if (!title || !description || image.length > 1200 ||
+      !/^https:\/\/[^\s<>]+$/i.test(image))
+    bad(400, 'Title, description and an HTTPS image URL are required.');
+  if (!['collection', 'scheme', 'coming-soon'].includes(action))
+    bad(400, 'Invalid announcement action.');
+  if (!Number.isSafeInteger(sortOrder) || sortOrder < 0 || sortOrder > 9999)
+    bad(400, 'Invalid slide order.');
+  return {
+    eyebrow: safe(body.eyebrow, 80), title, description, image,
+    cta: safe(body.cta, 50) || 'Explore Collection',
+    action, schemeSlug: /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(clean(body.schemeSlug).toLowerCase()) ? clean(body.schemeSlug).toLowerCase() : 'swarn-bachat-yojana',
+    sortOrder, active: body.active !== false
+  };
+}
+
 const Category = mongoose.models.Category || mongoose.model('Category', new mongoose.Schema({
   name: { type: String, required: true },
   description: { type: String, default: '' },
@@ -466,6 +530,10 @@ const benefitClaimSchema = new mongoose.Schema({
     ref: 'Product'
   },
   makingCharges: {
+    type: Number,
+    default: 0
+  },
+  purchaseAmount: {
     type: Number,
     default: 0
   },
@@ -1568,7 +1636,7 @@ async function createCustomer({
       schemeJoined && schemeConsentConfirmed ? new Date() : undefined,
     schemeTermsVersion:
       schemeJoined && schemeConsentConfirmed
-        ? 'join-day-first-installment-option-a-v3' : '',
+        ? 'join-day-first-installment-option-a-v4-gold-coin-cap' : '',
     schemeCycle: 1,
     paidMonths: 0,
     installmentState: scheme.states({
@@ -1586,8 +1654,8 @@ app.post('/api/customer/register', loginLimiter, wrap(async (req, res) => {
   const email = normalizeEmail(req.body.email);
   const address = safe(req.body.address, 500);
   const password = String(req.body.password ?? '');
-  if (!name || !validPhone(phone) || !validDate(dob) || !validEmail(email))
-    bad(400, 'Valid name, email, date of birth (YYYY-MM-DD) and Indian mobile are required.');
+  if (!name || !validPhone(phone) || !validDate(dob) || !validOptionalCustomerEmail(email))
+    bad(400, 'Valid name, date of birth (YYYY-MM-DD), Indian mobile and optional valid email are required.');
   if (password.length < 8 || password.length > 128)
     bad(400, 'Password must have 8–128 characters.');
   if (req.body.confirmPassword !== undefined &&
@@ -1661,8 +1729,8 @@ async function updateCustomerProfile(req, res) {
     c.address = safe(req.body.address, 500);
   if (req.body.email !== undefined) {
     const email = normalizeEmail(req.body.email);
-    if (!validEmail(email))
-      bad(400, 'Enter a valid email address.');
+    if (!validOptionalCustomerEmail(email))
+      bad(400, 'Enter a valid email address or leave it blank.');
     c.email = email;
   }
   if (req.body.dob !== undefined) {
@@ -1733,8 +1801,6 @@ app.post('/api/customer/join-scheme', customerAuth, wrap(async (req, res) => {
   );
   if (!validAmount(amount))
     bad(400, 'Monthly amount must be ₹5,000 to ₹10,00,000.');
-  if (!validEmail(normalizeEmail(req.customer.email)))
-    bad(400, 'Add a valid email to your profile before joining.');
   if (req.body.termsAccepted !== true)
     bad(400, 'Please accept the 5-day deadline, cancellation and refund review terms.');
   if (
@@ -1764,7 +1830,7 @@ app.post('/api/customer/join-scheme', customerAuth, wrap(async (req, res) => {
         schemeAnchorDay: Number(joinedDate.slice(8, 10)),
         schemeScheduleVersion: scheme.OPTION_A_SCHEDULE_VERSION,
         schemeTermsAcceptedAt: new Date(),
-        schemeTermsVersion: 'join-day-first-installment-option-a-v3',
+        schemeTermsVersion: 'join-day-first-installment-option-a-v4-gold-coin-cap',
         schemeSuspendedAt: null,
         schemeSuspendedDueMonth: '',
         schemeSuspendedDueDate: '',
@@ -1794,7 +1860,7 @@ app.post('/api/customer/join-scheme', customerAuth, wrap(async (req, res) => {
   res.json({
     success: true,
     customer: publicCustomer(updated),
-    message: 'Gold Scheme joined.'
+    message: 'No Making Charge on Jewellery scheme joined.'
   });
 }));
 
@@ -1906,6 +1972,123 @@ app.get('/api/customer/payment-requests', customerAuth, wrap(async (req, res) =>
   });
 }));
 
+// Informational Coming Soon scheme catalog; never accepts customer payments.
+app.get('/api/site/future-schemes', wrap(async (_req, res) => {
+  const schemes = await UpcomingScheme.find({ active: true })
+    .sort({ createdAt: 1 }).limit(100).lean();
+  res.json({ success: true, schemes });
+}));
+
+app.get('/api/admin/site/future-schemes', adminAuth, wrap(async (_req, res) => {
+  const schemes = await UpcomingScheme.find().sort({ createdAt: 1 }).limit(100).lean();
+  res.json({ success: true, schemes });
+}));
+
+app.post('/api/admin/site/future-schemes', adminAuth, wrap(async (req, res) => {
+  const schemeItem = await UpcomingScheme.create(upcomingSchemeInput(req.body));
+  res.status(201).json({ success: true, scheme: schemeItem });
+}));
+
+app.put('/api/admin/site/future-schemes/:id', adminAuth, wrap(async (req, res) => {
+  if (!validId(req.params.id)) bad(400, 'Invalid scheme ID.');
+  const schemeItem = await UpcomingScheme.findByIdAndUpdate(
+    req.params.id, { $set: upcomingSchemeInput(req.body) },
+    { new: true, runValidators: true }
+  );
+  if (!schemeItem) bad(404, 'Scheme not found.');
+  res.json({ success: true, scheme: schemeItem });
+}));
+
+app.delete('/api/admin/site/future-schemes/:id', adminAuth, wrap(async (req, res) => {
+  if (!validId(req.params.id)) bad(400, 'Invalid scheme ID.');
+  if (req.body?.confirmDelete !== true) bad(400, 'Confirm deletion.');
+  const result = await UpcomingScheme.deleteOne({ _id: req.params.id });
+  if (!result.deletedCount) bad(404, 'Scheme not found.');
+  res.json({ success: true });
+}));
+
+// Public active announcements, in addition to five default carousel slides.
+app.get('/api/site/announcements', wrap(async (_req, res) => {
+  const announcements = await SiteAnnouncement.find({ active: true })
+    .sort({ sortOrder: 1, createdAt: 1 }).limit(30).lean();
+  res.json({ success: true, announcements });
+}));
+
+app.get('/api/admin/site/announcements', adminAuth, wrap(async (_req, res) => {
+  const announcements = await SiteAnnouncement.find()
+    .sort({ sortOrder: 1, createdAt: 1 }).limit(100).lean();
+  res.json({ success: true, announcements });
+}));
+
+app.post('/api/admin/site/announcements', adminAuth, wrap(async (req, res) => {
+  const announcement = await SiteAnnouncement.create(announcementInput(req.body));
+  res.status(201).json({ success: true, announcement });
+}));
+
+app.put('/api/admin/site/announcements/:id', adminAuth, wrap(async (req, res) => {
+  if (!validId(req.params.id)) bad(400, 'Invalid announcement ID.');
+  const announcement = await SiteAnnouncement.findByIdAndUpdate(
+    req.params.id, { $set: announcementInput(req.body) },
+    { new: true, runValidators: true }
+  );
+  if (!announcement) bad(404, 'Announcement not found.');
+  res.json({ success: true, announcement });
+}));
+
+app.delete('/api/admin/site/announcements/:id', adminAuth, wrap(async (req, res) => {
+  if (!validId(req.params.id)) bad(400, 'Invalid announcement ID.');
+  if (req.body?.confirmDelete !== true)
+    bad(400, 'Confirm announcement deletion.');
+  const result = await SiteAnnouncement.deleteOne({ _id: req.params.id });
+  if (!result.deletedCount) bad(404, 'Announcement not found.');
+  res.json({ success: true });
+}));
+
+// Independent contact directory: live customers + retained minimal entries.
+app.get('/api/admin/customer-contacts', adminAuth, wrap(async (_req, res) => {
+  const [live, saved] = await Promise.all([
+    User.find().select('name phone dob').lean(),
+    CustomerContact.find().lean()
+  ]);
+  const byPhone = new Map();
+  saved.forEach(c => byPhone.set(c.phone, {
+    _id: String(c._id), name: c.name, phone: c.phone,
+    dob: c.dob || '', activeProfile: false
+  }));
+  live.forEach(c => byPhone.set(c.phone, {
+    _id: String(c._id), name: c.name, phone: c.phone,
+    dob: c.dob || '', activeProfile: true
+  }));
+  res.json({ success: true, contacts: [...byPhone.values()].sort(
+    (a, b) => a.name.localeCompare(b.name)
+  ) });
+}));
+
+// Only a separately archived contact can be removed from the contact directory.
+app.delete('/api/admin/customer-contacts/:id', adminAuth, wrap(async (req, res) => {
+  if (!validId(req.params.id)) bad(400, 'Invalid contact ID.');
+  const phone = clean(req.body?.confirmPhone);
+  const reason = safe(req.body?.reason, 300);
+  if (req.body?.confirmDelete !== true || !validPhone(phone) || reason.length < 5)
+    bad(400, 'Confirm the phone number and provide a deletion reason.');
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const contact = await CustomerContact.findById(req.params.id).session(session);
+      if (!contact) bad(404, 'Saved contact not found.');
+      if (contact.phone !== phone) bad(400, 'Phone confirmation does not match.');
+      if (await User.exists({ phone }).session(session))
+        bad(409, 'Active customer profile exists. Delete that profile first.');
+      await AdminAudit.create([{
+        action: 'CUSTOMER_CONTACT_DELETE', customerId: 'DIRECTORY',
+        reason: 'Admin removed saved directory contact: ' + reason
+      }], { session });
+      await CustomerContact.deleteOne({ _id: contact._id }).session(session);
+    });
+  } finally { await session.endSession(); }
+  res.json({ success: true, message: 'Saved directory contact deleted.' });
+}));
+
 // ADMIN CUSTOMER DIRECTORY
 app.get('/api/admin/customers', adminAuth, wrap(async (_req, res) => {
   await sweepOverdueSchemes();
@@ -1926,8 +2109,8 @@ app.post('/api/admin/create-customer', adminAuth, wrap(async (req, res) => {
   const address = safe(req.body.address, 500);
   const password = String(req.body.password ?? '');
 
-  if (!name || !validPhone(phone) || !validEmail(email))
-    bad(400, 'Valid name, email and Indian mobile required.');
+  if (!name || !validPhone(phone) || !validOptionalCustomerEmail(email))
+    bad(400, 'Valid name, Indian mobile and optional valid email required.');
   if (dob && !validDate(dob))
     bad(400, 'Invalid date of birth.');
   if (password.length < 8 || password.length > 128)
@@ -1965,8 +2148,8 @@ app.put('/api/admin/customers/:id/email', adminAuth, wrap(async (req, res) => {
   if (!validId(req.params.id))
     bad(400, 'Invalid customer ID.');
   const email = normalizeEmail(req.body.email);
-  if (!validEmail(email))
-    bad(400, 'Enter a valid customer email address.');
+  if (!validOptionalCustomerEmail(email))
+    bad(400, 'Enter a valid customer email address or leave it blank.');
   const customer = await User.findByIdAndUpdate(
     req.params.id,
     { $set: { email } },
@@ -2049,6 +2232,7 @@ app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) =>
   const session = await mongoose.startSession();
   let deletedCustomerId = '';
   let removedRequests = 0;
+  let removedClaims = 0;
 
   try {
     await session.withTransaction(async () => {
@@ -2066,9 +2250,28 @@ app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) =>
 
       deletedCustomerId = customer.customerId;
 
+      const claims = await BenefitClaim.find({
+        customer: customer._id
+      }).session(session).lean();
+
+      // Never silently discard unsettled financial requests or claims.
+      // The Admin can delete a settled profile manually; nothing auto-deletes.
+      if (requests.some(r => r.status === 'Pending') ||
+          claims.some(c => ['Pending', 'Verified'].includes(c.status)) ||
+          customer.schemeStatus === 'RefundPending') {
+        bad(409, 'Resolve pending UPI requests, benefit claims and refunds before deleting this profile.');
+      }
+
       const financialSnapshot = {
         schemeJoined: customer.schemeJoined,
         customInstallment: customer.customInstallment,
+        benefitClaims: claims.map(c => ({
+          claimId: c.claimId, status: c.status,
+          schemeCycle: c.schemeCycle, totalPaid: c.totalPaid,
+          redeemedAt: c.redeemedAt, redeemedProduct: c.redeemedProduct,
+          purchaseAmount: c.purchaseAmount, makingCharges: c.makingCharges,
+          discountAmount: c.discountAmount
+        })),
         paidMonths: customer.paidMonths,
         paymentHistory: customer.paymentHistory.map(p => ({
           monthNum: p.monthNum,
@@ -2099,6 +2302,22 @@ app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) =>
         details: financialSnapshot
       }], { session });
 
+      // Keep only name, phone and DOB in the separate directory.
+      await CustomerContact.updateOne(
+        { phone: customer.phone },
+        { $set: {
+          name: customer.name,
+          phone: customer.phone,
+          dob: customer.dob || ''
+        } },
+        { upsert: true, session }
+      );
+
+      const claimsResult = await BenefitClaim.deleteMany({
+        customer: customer._id
+      }).session(session);
+      removedClaims = claimsResult.deletedCount || 0;
+
       const requestsResult = await PaymentRequest.deleteMany({
         customer: customer._id
       }).session(session);
@@ -2118,7 +2337,9 @@ app.delete('/api/admin/delete-customer/:id', adminAuth, wrap(async (req, res) =>
     success: true,
     deletedCustomerId,
     removedRequests,
-    message: 'Customer and linked payment requests deleted. Financial audit retained; no bank refund was made.'
+    removedClaims,
+    contactRetained: true,
+    message: 'Customer, scheme claims and linked payment requests deleted. Name, phone and DOB retained in separate directory. Financial audit retained; no bank refund was made.'
   });
 }));
 
@@ -2698,6 +2919,7 @@ app.post('/api/customer/redeem-scheme', customerAuth, wrap(async (req, res) => {
       customerId: req.customer.customerId,
       customerName: req.customer.name,
       totalAccumulatedSavings,
+      maximumEligiblePurchase: totalAccumulatedSavings,
       standardMakingCharges,
       makingChargesDiscountPercentage: eligible ? 100 : 0,
       finalMakingChargesToPay: eligible
@@ -3018,8 +3240,17 @@ app.post(
     if (!isGold) {
       bad(
         409,
-        'Benefit is valid only for eligible Gold Jewellery.'
+        'Benefit is valid only for eligible Gold Jewellery or Gold Coins.'
       );
+    }
+
+    // The actual invoice product value is checked server-side, not just
+    // displayed in the Admin Panel. Making charges are waived separately.
+    const purchaseAmount = Number(req.body.purchaseAmount);
+    const verifiedDeposits = countPaid(customer) *
+      Number(customer.customInstallment || 0);
+    if (!withinVerifiedDeposits(purchaseAmount, verifiedDeposits)) {
+      bad(400, `Eligible Gold Jewellery / Gold Coin purchase must be above ₹0 and at most ₹${verifiedDeposits}.`);
     }
 
     const makingCharges = Number(
@@ -3060,6 +3291,7 @@ app.post(
           redeemedAt: new Date(),
           redeemedBy: ADMIN_EMAIL,
           redeemedProduct: product._id,
+          purchaseAmount,
           makingCharges,
           discountAmount: makingCharges,
           adminReason: reason
@@ -3084,6 +3316,8 @@ app.post(
         claimId: updated.claimId,
         productId: String(product._id),
         productTitle: product.title,
+        purchaseAmount,
+        verifiedDeposits,
         makingCharges,
         discountAmount: makingCharges,
         goldOnly: true,
@@ -3098,7 +3332,7 @@ app.post(
       makingChargesToPay: 0,
       discountAmount: makingCharges,
       message:
-        'Making/labour charge benefit redeemed for eligible Gold Jewellery.'
+        'Making/labour charge benefit redeemed for eligible Gold Jewellery or Gold Coins within verified deposits.'
     });
   })
 );
@@ -3689,7 +3923,7 @@ app.post('/api/admin/send-whatsapp-reminder',
     });
     if (!c || !c.schemeJoined ||
         c.schemeStatus !== 'Active')
-      bad(404, 'Active Gold Scheme subscriber not found.');
+      bad(404, 'Active scheme subscriber not found.');
     if (Number(c.paidMonths || 0) >= 12)
       bad(409, 'All installments completed.');
 
@@ -3698,7 +3932,7 @@ app.post('/api/admin/send-whatsapp-reminder',
 
     const message =
       `नमस्ते ${c.name} जी,\n\n` +
-      `Rahul Jewellers SHEOGANJ Gold Savings Scheme रिमाइंडर।\n` +
+      `Rahul Jewellers SHEOGANJ No Making Charge Scheme रिमाइंडर।\n` +
       `Customer ID: ${c.customerId}\n` +
       `किस्त: ${month}/12\n` +
       `राशि: ₹${Number(c.customInstallment).toLocaleString('en-IN')}\n` +
@@ -3823,9 +4057,9 @@ app.post('/api/support/chat', chatLimiter, wrap(async (req, res) => {
       systemInstruction:
         `You are the Hindi-first assistant for Rahul Jewellers SHEOGANJ, Rajasthan. Contact numbers: 9950091024 and 9461452322. ` +
         `The showroom sells Gold and Silver jewellery. ` +
-        `The 12+1 savings scheme is GOLD ONLY. ` +
+        `The No Making Charge on Jewellery scheme is GOLD ONLY. ` +
         `Customers pay 12 monthly installments, and in the following month eligible ` +
-        `customers get 100% off labour/making charges on gold jewellery, subject to terms. ` +
+        `customers get 100% off labour/making charges on eligible gold jewellery or gold coins, for a purchase up to the verified total deposited amount, subject to terms. ` +
         `There is NO free 13th installment, free extra gold, or silver savings scheme. ` +
         `UPI installment submissions remain Pending until admin verifies. ` +
         `Never claim a manually entered gold rate is a live market rate.`
