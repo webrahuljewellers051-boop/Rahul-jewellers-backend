@@ -1,0 +1,595 @@
+
+--- a/server.js
++++ b/server.js
+@@ -18,6 +18,7 @@
+ import { promisify } from 'node:util';
+ import { GoogleGenAI } from '@google/genai';
+ import * as scheme from './schemeLogic.js';
++import { mainCategoryName, isProtectedRoot, canMoveBetweenRoots } from './categoryPolicy.js';
+ 
+ dotenv.config();
+ const app = express();
+@@ -77,6 +78,7 @@
+ const validEmail = value => value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value);
+ const validAmount = value => Number.isInteger(value) && value >= 5000 && value <= 1000000;
+ const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++
+ 
+ function istParts(date, fields) {
+   return Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+@@ -342,7 +344,8 @@
+   },
+   description: {
+     type: String,
+-    default: ''
++    required: true,
++    trim: true
+   },
+   price: {
+     type: Number,
+@@ -717,9 +720,9 @@
+         success: false, message: 'Admin login required.'
+       });
+     const p = jwt.verify(token, JWT_SECRET);
+-    if (!(p.type === 'admin' || p.role === 'admin' ||
+-      (!p.type && !p.role &&
+-        clean(p.email).toLowerCase() === ADMIN_EMAIL))) {
++    if (clean(p.email).toLowerCase() !== ADMIN_EMAIL ||
++        !(p.type === 'admin' || p.role === 'admin' ||
++          (!p.type && !p.role))) {
+       return res.status(403).json({
+         success: false, message: 'Admin access only.'
+       });
+@@ -837,55 +840,53 @@
+   return base + '-' + randomBytes(4).toString('hex');
+ }
+ 
++// MongoDB documents have a 16 MB limit. Hosted image URLs are preferred
++// for large galleries; local uploads are compressed and have a shared budget.
++const MAX_PRODUCT_IMAGES = 100;
++const MAX_EMBEDDED_IMAGE_CHARS = 6 * 1024 * 1024;
++
+ function normalizeImages(body, existing = []) {
+-  if (
+-    body.images === undefined &&
+-    body.imageUrl === undefined
+-  ) {
++  if (body.images === undefined && body.imageUrl === undefined) {
+     return existing;
+   }
+ 
+-  let images = body.images;
+-
+-  if (!Array.isArray(images)) {
+-    images = body.imageUrl
+-      ? [body.imageUrl]
+-      : existing;
++  const images = Array.isArray(body.images)
++    ? body.images
++    : body.imageUrl ? [body.imageUrl] : existing;
++
++  if (!images.length) bad(400, 'At least one product photo is required.');
++  if (images.length > MAX_PRODUCT_IMAGES) {
++    bad(400, `Maximum ${MAX_PRODUCT_IMAGES} product photos are allowed.`);
+   }
+ 
+-  if (images.length > 12) {
+-    bad(400, 'Maximum 12 product images are allowed.');
++  let embeddedChars = 0;
++  const normalized = images.map((image, index) => {
++    const url = typeof image === 'string' ? image : image?.url;
++    const alt = typeof image === 'string' ? '' : image?.alt;
++    if (!validJewelleryImage(url)) {
++      bad(400, 'Invalid HTTPS image URL or image data at position ' + (index + 1));
++    }
++    const cleanUrl = String(url);
++    if (cleanUrl.startsWith('data:')) {
++      embeddedChars += cleanUrl.length;
++    } else if (cleanUrl.length > 2048) {
++      bad(400, 'Image URL exceeds 2048 characters.');
++    }
++    return { url: cleanUrl, alt: safe(alt, 150) };
++  });
++
++  if (embeddedChars > MAX_EMBEDDED_IMAGE_CHARS) {
++    bad(413, 'Local photos exceed the 6 MB storage budget. Use fewer compressed photos or hosted HTTPS image URLs.');
+   }
+-
+-  return images.map((image, index) => {
+-    const url = typeof image === 'string'
+-      ? image
+-      : image?.url;
+-
+-    const alt = typeof image === 'string'
+-      ? ''
+-      : image?.alt;
+-
+-    if (!validJewelleryImage(url)) {
+-      bad(
+-        400,
+-        'Invalid image URL at position ' + (index + 1)
+-      );
+-    }
+-
+-    return {
+-      url: String(url),
+-      alt: safe(alt, 150)
+-    };
+-  });
++  return normalized;
+ }
+ 
+-async function getRootCategory(categoryId) {
++async function getRootCategory(categoryId, session = null) {
+   if (!categoryId) return null;
+ 
+   let current = await Category.findById(
+     categoryId
+-  ).lean();
++  ).session(session).lean();
+ 
+   if (!current) {
+     bad(404, 'Selected jewellery folder not found.');
+@@ -904,7 +905,7 @@
+ 
+     current = await Category.findById(
+       current.parentCategory
+-    ).lean();
++    ).session(session).lean();
+ 
+     if (!current) {
+       bad(409, 'Category parent is missing.');
+@@ -914,9 +915,10 @@
+   return current;
+ }
+ 
+-async function categoryTreeIds(rootId) {
++async function categoryTreeIds(rootId, session = null) {
+   const all = await Category.find()
+     .select('_id parentCategory')
++    .session(session)
+     .lean();
+ 
+   const result = new Set([String(rootId)]);
+@@ -940,6 +942,15 @@
+   }
+ 
+   return [...result];
++}
++
++async function siblingCategoryExists(name, parentId, excludeId = null) {
++  const query = {
++    name: { $regex: `^${escapeRegex(name)}$`, $options: 'i' },
++    parentCategory: parentId || null
++  };
++  if (excludeId) query._id = { $ne: excludeId };
++  return Boolean(await Category.exists(query));
+ }
+ 
+ function productFields(body, current = null) {
+@@ -991,11 +1002,7 @@
+ 
+     fields.images = images;
+ 
+-    if (images.length) {
+-      fields.imageUrl = images[0].url;
+-    } else if (body.imageUrl) {
+-      fields.imageUrl = String(body.imageUrl);
+-    }
++    fields.imageUrl = images[0].url;
+   }
+ 
+   return fields;
+@@ -1050,29 +1057,22 @@
+   wrap(async (req, res) => {
+     const fields = productFields(req.body);
+ 
+-    if (!fields.title || !fields.weight) {
+-      bad(
+-        400,
+-        'Product name and weight are required.'
+-      );
++    if (!fields.title || !fields.weight || !fields.description) {
++      bad(400, 'Product name, main weight and description are required.');
+     }
+ 
+     const categoryId = req.body.categoryId;
+-
+-    if (categoryId) {
+-      if (!validId(categoryId)) {
+-        bad(400, 'Invalid folder ID.');
+-      }
+-
+-      const root = await getRootCategory(categoryId);
+-
+-      fields.category = root.name;
+-      fields.categoryId = categoryId;
+-    }
+-
+-    if (!fields.category) {
+-      bad(400, 'Jewellery category is required.');
+-    }
++    if (!categoryId || !validId(categoryId)) {
++      bad(400, 'Choose a folder under Gold, Polki, Kundan, Diamond or Silver.');
++    }
++
++    const root = await getRootCategory(categoryId);
++    if (!mainCategoryName(root.name)) {
++      bad(409, 'This folder is outside the five main jewellery categories.');
++    }
++
++    fields.category = mainCategoryName(root.name);
++    fields.categoryId = categoryId;
+ 
+     if (!fields.imageUrl) {
+       bad(400, 'At least one image is required.');
+@@ -1113,20 +1113,21 @@
+     if (req.body.categoryId !== undefined) {
+       const categoryId = req.body.categoryId;
+ 
+-      if (!categoryId) {
+-        fields.categoryId = null;
+-      } else {
+-        if (!validId(categoryId)) {
+-          bad(400, 'Invalid folder ID.');
+-        }
+-
+-        const root = await getRootCategory(
+-          categoryId
+-        );
+-
+-        fields.categoryId = categoryId;
+-        fields.category = root.name;
++      if (!categoryId || !validId(categoryId)) {
++        bad(400, 'Choose a valid jewellery folder.');
+       }
++
++      const root = await getRootCategory(categoryId);
++      if (!mainCategoryName(root.name)) {
++        bad(409, 'Selected folder is outside the five main jewellery categories.');
++      }
++
++      fields.categoryId = categoryId;
++      fields.category = mainCategoryName(root.name);
++    } else if (existing.categoryId) {
++      // A caller cannot spoof a different metal by changing only category text.
++      const root = await getRootCategory(existing.categoryId);
++      fields.category = mainCategoryName(root.name) || root.name;
+     }
+ 
+     Object.assign(existing, fields);
+@@ -1135,11 +1136,12 @@
+       !existing.title ||
+       !existing.category ||
+       !existing.weight ||
++      !existing.description ||
+       !existing.imageUrl
+     ) {
+       bad(
+         400,
+-        'Name, category, weight and image are required.'
++        'Name, category, main weight, description and main image are required.'
+       );
+     }
+ 
+@@ -1201,19 +1203,22 @@
+       req.body.parentCategory || null;
+ 
+     if (parentId) {
+-      if (!validId(parentId)) {
+-        bad(400, 'Invalid parent category.');
++      if (!validId(parentId)) bad(400, 'Invalid parent category.');
++      const root = await getRootCategory(parentId);
++      if (!mainCategoryName(root.name)) {
++        bad(409, 'Subfolders must belong to one of the five main categories.');
+       }
+-
+-      if (!await Category.exists({
+-        _id: parentId
+-      })) {
+-        bad(404, 'Parent category not found.');
+-      }
++    } else if (!mainCategoryName(name)) {
++      bad(400, 'Only Gold, Polki, Kundan, Diamond and Silver may be main categories.');
++    }
++
++    const normalizedName = parentId ? name : mainCategoryName(name);
++    if (await siblingCategoryExists(normalizedName, parentId)) {
++      bad(409, 'A folder with this name already exists under the selected parent.');
+     }
+ 
+     const category = await Category.create({
+-      name,
++      name: normalizedName,
+       description: safe(
+         req.body.description,
+         400
+@@ -1233,126 +1238,191 @@
+   adminAuth,
+   wrap(async (req, res) => {
+     const id = req.params.id;
+-
+-    if (!validId(id)) {
+-      bad(400, 'Invalid category ID.');
+-    }
++    if (!validId(id)) bad(400, 'Invalid category ID.');
+ 
+     const category = await Category.findById(id);
+-
+-    if (!category) {
+-      bad(404, 'Category not found.');
+-    }
+-
+-    if (req.body.name !== undefined) {
+-      const name = safe(req.body.name, 100);
+-
+-      if (!name) {
+-        bad(400, 'Category name cannot be empty.');
++    if (!category) bad(404, 'Category not found.');
++    if (isProtectedRoot(category)) {
++      bad(403, 'The five permanent main categories cannot be edited or moved.');
++    }
++
++    const oldRoot = await getRootCategory(id);
++    const name = req.body.name !== undefined
++      ? safe(req.body.name, 100)
++      : category.name;
++    if (!name) bad(400, 'Category name cannot be empty.');
++
++    const parentId = req.body.parentCategory !== undefined
++      ? (req.body.parentCategory || null)
++      : (category.parentCategory || null);
++
++    if (parentId) {
++      if (!validId(parentId)) bad(400, 'Invalid parent category.');
++      const descendants = await categoryTreeIds(id);
++      if (descendants.includes(String(parentId))) {
++        bad(409, 'Cannot move a folder inside itself or its subfolder.');
+       }
+-
+-      category.name = name;
+-    }
+-
++      const destinationRoot = await getRootCategory(parentId);
++      const destinationType = mainCategoryName(destinationRoot.name);
++      if (!destinationType) {
++        bad(409, 'Destination must belong to a main jewellery category.');
++      }
++      if (!canMoveBetweenRoots(oldRoot.name, destinationRoot.name)) {
++        bad(409, 'Cannot move folders between Gold, Polki, Kundan, Diamond and Silver.');
++      }
++    } else {
++      // Existing legacy root folders can be migrated under a main root,
++      // but cannot be converted into a sixth main category.
++      bad(400, 'Choose a parent under one of the five main categories.');
++    }
++
++    if (await siblingCategoryExists(name, parentId, id)) {
++      bad(409, 'A folder with this name already exists under the selected parent.');
++    }
++
++    category.name = name;
++    category.parentCategory = parentId;
+     if (req.body.description !== undefined) {
+-      category.description = safe(
+-        req.body.description,
+-        400
+-      );
+-    }
+-
+-    if (req.body.parentCategory !== undefined) {
+-      const parentId =
+-        req.body.parentCategory || null;
+-
+-      if (parentId) {
+-        if (!validId(parentId)) {
+-          bad(400, 'Invalid parent category.');
+-        }
+-
+-        const descendants = await categoryTreeIds(id);
+-
+-        if (descendants.includes(String(parentId))) {
+-          bad(
+-            409,
+-            'Cannot move a folder inside itself or its subfolder.'
+-          );
+-        }
+-
+-        if (!await Category.exists({
+-          _id: parentId
+-        })) {
+-          bad(404, 'Parent category not found.');
+-        }
+-      }
+-
+-      category.parentCategory = parentId;
+-    }
+-
++      category.description = safe(req.body.description, 400);
++    }
+     await category.save();
+ 
+     const root = await getRootCategory(id);
+     const affectedIds = await categoryTreeIds(id);
+-
+     await Product.updateMany(
+-      {
+-        categoryId: {
+-          $in: affectedIds
++      { categoryId: { $in: affectedIds } },
++      { $set: { category: mainCategoryName(root.name) || root.name } }
++    );
++
++    res.json({ success: true, category, affectedFolders: affectedIds.length });
++  })
++);
++
++// Atomic safe deletion: move direct products and subfolders, then delete.
++// MongoDB Atlas transactions keep all changes together on success/failure.
++app.post(
++  '/api/admin/categories/:id/move-and-delete',
++  adminAuth,
++  wrap(async (req, res) => {
++    const id = req.params.id;
++    const destinationId = clean(req.body?.destinationId);
++    if (!validId(id) || (destinationId && !validId(destinationId))) {
++      bad(400, 'Invalid source or destination folder ID.');
++    }
++
++    const session = await mongoose.startSession();
++    let movedProducts = 0;
++    let movedFolders = 0;
++
++    try {
++      await session.withTransaction(async () => {
++        const target = await Category.findById(id).session(session);
++        if (!target) bad(404, 'Folder not found.');
++        if (isProtectedRoot(target)) {
++          bad(403, 'The five permanent main categories cannot be deleted.');
+         }
+-      },
+-      {
+-        $set: {
+-          category: root.name
++
++        const directProducts = await Product.find({ categoryId: id })
++          .select('_id').session(session).lean();
++        const directChildren = await Category.find({ parentCategory: id })
++          .select('_id name').session(session).lean();
++        const hasContents = directProducts.length || directChildren.length;
++        if (hasContents && !destinationId) {
++          bad(409, 'Choose a destination to move products and subfolders before deletion.');
+         }
+-      }
+-    );
++
++        if (destinationId) {
++          const descendants = await categoryTreeIds(id, session);
++          if (descendants.includes(destinationId)) {
++            bad(409, 'Destination cannot be the folder itself or its subfolder.');
++          }
++          const destination = await Category.findById(destinationId)
++            .session(session).lean();
++          if (!destination) bad(404, 'Destination folder not found.');
++
++          const oldRoot = await getRootCategory(id, session);
++          const destinationRoot = await getRootCategory(destinationId, session);
++          const newType = mainCategoryName(destinationRoot.name);
++          if (!newType) bad(409, 'Destination must be under a main jewellery category.');
++          if (!canMoveBetweenRoots(oldRoot.name, destinationRoot.name)) {
++            bad(409, 'Cannot move products between different main jewellery types.');
++          }
++
++          const existingChildren = await Category.find({ parentCategory: destinationId })
++            .select('name').session(session).lean();
++          const usedNames = new Set(existingChildren.map(item =>
++            clean(item.name).toLowerCase()
++          ));
++          for (const child of directChildren) {
++            const key = clean(child.name).toLowerCase();
++            if (usedNames.has(key)) {
++              bad(409, `Destination already has a subfolder named ${safe(child.name, 100)}.`);
++            }
++            usedNames.add(key);
++          }
++
++          if (directChildren.length) {
++            await Category.updateMany(
++              { parentCategory: id },
++              { $set: { parentCategory: destination._id } },
++              { session }
++            );
++          }
++          if (directProducts.length) {
++            await Product.updateMany(
++              { categoryId: id },
++              { $set: { categoryId: destination._id, category: newType } },
++              { session }
++            );
++          }
++          // When moving a legacy root, its descendant products need the new root.
++          if (oldRoot.name !== destinationRoot.name && descendants.length > 1) {
++            await Product.updateMany(
++              { categoryId: { $in: descendants.filter(item => item !== id) } },
++              { $set: { category: newType } },
++              { session }
++            );
++          }
++        }
++
++        const result = await Category.deleteOne({ _id: id }, { session });
++        if (result.deletedCount !== 1) bad(409, 'Folder changed. Refresh and retry.');
++        movedProducts = directProducts.length;
++        movedFolders = directChildren.length;
++      });
++    } finally {
++      await session.endSession();
++    }
+ 
+     res.json({
+       success: true,
+-      category,
+-      affectedFolders: affectedIds.length
++      message: 'Folder deleted. Products and subfolders were preserved.',
++      movedProducts,
++      movedFolders
+     });
+   })
+ );
+ 
++// The simple DELETE endpoint only deletes an empty subfolder.
+ app.delete(
+   '/api/admin/categories/:id',
+   adminAuth,
+   wrap(async (req, res) => {
+     const id = req.params.id;
+-
+-    if (!validId(id)) {
+-      bad(400, 'Invalid category ID.');
+-    }
+-
+-    if (await Product.exists({
+-      categoryId: id
+-    })) {
+-      bad(
+-        409,
+-        'Move products out of this folder first.'
+-      );
+-    }
+-
+-    if (await Category.exists({
+-      parentCategory: id
+-    })) {
+-      bad(
+-        409,
+-        'Move or delete subfolders first.'
+-      );
+-    }
+-
+-    const deleted = await Category.findByIdAndDelete(id);
+-
+-    if (!deleted) {
+-      bad(404, 'Category not found.');
+-    }
+-
+-    res.json({
+-      success: true,
+-      message: 'Category deleted.'
+-    });
++    if (!validId(id)) bad(400, 'Invalid category ID.');
++    const target = await Category.findById(id);
++    if (!target) bad(404, 'Category not found.');
++    if (isProtectedRoot(target)) {
++      bad(403, 'The five permanent main categories cannot be deleted.');
++    }
++    if (await Product.exists({ categoryId: id })) {
++      bad(409, 'Move products out of this folder first.');
++    }
++    if (await Category.exists({ parentCategory: id })) {
++      bad(409, 'Move or delete subfolders first.');
++    }
++    await Category.deleteOne({ _id: id });
++    res.json({ success: true, message: 'Empty folder deleted.' });
+   })
+ );
+ 
